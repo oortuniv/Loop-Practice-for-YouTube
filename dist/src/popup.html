@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>YouTube Loop & Practice</title>
+  <style>
+    body {
+      width: 320px;
+      min-height: 200px;
+      margin: 0;
+      padding: 16px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f8f9fa;
+      color: #212529;
+    }
+    
+    .header {
+      text-align: center;
+      margin-bottom: 16px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid #dee2e6;
+    }
+    
+    .header h1 {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 600;
+      color: #dc3545;
+    }
+    
+    .status-section {
+      background: white;
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 12px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    
+    .status-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+    
+    .status-item:last-child {
+      margin-bottom: 0;
+    }
+    
+    .label {
+      font-size: 14px;
+      color: #6c757d;
+    }
+    
+    .value {
+      font-size: 14px;
+      font-weight: 500;
+      color: #212529;
+    }
+    
+    .actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    
+    .btn {
+      flex: 1;
+      padding: 8px 12px;
+      border: none;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    
+    .btn-primary {
+      background: #dc3545;
+      color: white;
+    }
+    
+    .btn-primary:hover {
+      background: #c82333;
+    }
+    
+    .btn-secondary {
+      background: #6c757d;
+      color: white;
+    }
+    
+    .btn-secondary:hover {
+      background: #5a6268;
+    }
+    
+    .error {
+      color: #dc3545;
+      font-size: 13px;
+      text-align: center;
+      padding: 12px;
+    }
+    
+    .success {
+      color: #28a745;
+      font-size: 13px;
+      text-align: center;
+      padding: 12px;
+    }
+    
+    .controls-section {
+      background: white;
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 12px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    
+    .control-group {
+      margin-bottom: 12px;
+    }
+    
+    .control-group:last-child {
+      margin-bottom: 0;
+    }
+    
+    .control-group label {
+      display: block;
+      font-size: 12px;
+      font-weight: 500;
+      color: #495057;
+      margin-bottom: 6px;
+    }
+    
+    .rate-controls,
+    .segment-controls,
+    .bpm-controls,
+    .segment-management {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+    
+    .btn-small {
+      padding: 4px 8px;
+      font-size: 11px;
+      min-width: auto;
+    }
+    
+    .bpm-input,
+    .segment-input {
+      flex: 1;
+      padding: 4px 8px;
+      border: 1px solid #ced4da;
+      border-radius: 4px;
+      font-size: 11px;
+      background: white;
+    }
+    
+    .segments-list {
+      max-height: 200px;
+      overflow-y: auto;
+      background: white;
+      border-radius: 8px;
+      padding: 8px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    
+    .segment-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 6px 8px;
+      border-radius: 4px;
+      margin-bottom: 4px;
+      background: #f8f9fa;
+      font-size: 11px;
+    }
+    
+    .segment-item.active {
+      background: #dc3545;
+      color: white;
+    }
+    
+    .segment-info {
+      flex: 1;
+    }
+    
+    .segment-label {
+      font-weight: 500;
+      margin-bottom: 2px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    
+    .label-edit-btn {
+      background: none;
+      border: none;
+      color: rgba(108, 117, 125, 0.6);
+      cursor: pointer;
+      font-size: 10px;
+      padding: 0;
+      margin: 0;
+      transition: color 0.2s ease;
+    }
+    
+    .label-edit-btn:hover {
+      color: rgba(23, 162, 184, 0.8);
+    }
+    
+    .label-input {
+      flex: 1;
+      padding: 2px 4px;
+      border: 1px solid #ced4da;
+      border-radius: 2px;
+      font-size: 11px;
+      background: white;
+      min-width: 60px;
+    }
+    
+    .segment-time {
+      color: #6c757d;
+      font-size: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      margin-top: 4px;
+    }
+    
+    .time-input-group {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    
+    .time-input-group span {
+      min-width: 30px;
+      font-size: 9px;
+    }
+    
+    .time-input {
+      flex: 1;
+      padding: 2px 4px;
+      border: 1px solid #ced4da;
+      border-radius: 2px;
+      font-size: 9px;
+      background: white;
+      min-width: 40px;
+      text-align: center;
+    }
+    
+    .time-input:focus {
+      outline: none;
+      border-color: #17a2b8;
+      box-shadow: 0 0 0 1px rgba(23, 162, 184, 0.2);
+    }
+    
+    .time-set-btn {
+      background: #6c757d;
+      color: white;
+      border: none;
+      border-radius: 2px;
+      font-size: 8px;
+      padding: 1px 3px;
+      cursor: pointer;
+    }
+    
+    .time-set-btn:hover {
+      background: #5a6268;
+    }
+    
+    .rate-control-group {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      margin-top: 4px;
+    }
+    
+    .rate-control-group span {
+      font-size: 9px;
+      min-width: 25px;
+    }
+    
+    .rate-input-container {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      flex: 1;
+    }
+    
+    .rate-btn {
+      background: #17a2b8;
+      color: white;
+      border: none;
+      border-radius: 2px;
+      font-size: 8px;
+      padding: 1px 4px;
+      cursor: pointer;
+      min-width: 16px;
+      height: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    
+    .rate-btn:hover {
+      background: #138496;
+    }
+    
+    .rate-input {
+      flex: 1;
+      padding: 2px 4px;
+      border: 1px solid #ced4da;
+      border-radius: 2px;
+      font-size: 9px;
+      background: white;
+      text-align: center;
+      min-width: 30px;
+    }
+    
+    .rate-input:focus {
+      outline: none;
+      border-color: #17a2b8;
+      box-shadow: 0 0 0 1px rgba(23, 162, 184, 0.2);
+    }
+    
+    .rate-unit {
+      font-size: 8px;
+      color: #6c757d;
+      min-width: 12px;
+    }
+    
+    .rate-slider-container {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      margin-top: 4px;
+    }
+    
+    .rate-slider {
+      flex: 1;
+      height: 4px;
+      background: #dee2e6;
+      border-radius: 2px;
+      outline: none;
+      -webkit-appearance: none;
+    }
+    
+    .rate-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 12px;
+      height: 12px;
+      background: #17a2b8;
+      border-radius: 50%;
+      cursor: pointer;
+    }
+    
+    .rate-slider::-moz-range-thumb {
+      width: 12px;
+      height: 12px;
+      background: #17a2b8;
+      border-radius: 50%;
+      cursor: pointer;
+      border: none;
+    }
+    
+    .rate-value {
+      font-size: 10px;
+      color: #495057;
+      min-width: 35px;
+      text-align: right;
+    }
+    
+    .segment-actions {
+      display: flex;
+      gap: 4px;
+    }
+    
+    .btn-danger {
+      background: #dc3545;
+      color: white;
+    }
+    
+    .btn-danger:hover {
+      background: #c82333;
+    }
+    
+    .btn-edit {
+      background: #17a2b8;
+      color: white;
+    }
+    
+    .btn-edit:hover {
+      background: #138496;
+    }
+    
+    .btn-success {
+      background: #28a745;
+      color: white;
+    }
+    
+    .btn-success:hover {
+      background: #218838;
+    }
+    
+    .edit-mode {
+      background: #fff3cd;
+      border: 1px solid #ffeaa7;
+      box-shadow: 0 0 0 2px rgba(255, 193, 7, 0.2);
+    }
+    
+    .edit-mode .time-input,
+    .edit-mode .rate-input {
+      background: #fff;
+      border-color: #ffc107;
+    }
+    
+    .edit-mode .time-input:focus,
+    .edit-mode .rate-input:focus {
+      border-color: #ffc107;
+      box-shadow: 0 0 0 1px rgba(255, 193, 7, 0.3);
+    }
+    
+    .edit-mode .label-edit-btn {
+      color: #ffc107;
+    }
+    
+    .edit-mode .label-edit-btn:hover {
+      color: #e0a800;
+    }
+    
+    .edit-form {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding: 8px;
+      background: #f8f9fa;
+      border-radius: 4px;
+      margin-top: 6px;
+    }
+    
+    .edit-row {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+    
+    .edit-row label {
+      font-size: 10px;
+      color: #495057;
+      min-width: 40px;
+    }
+    
+    .edit-input {
+      flex: 1;
+      padding: 2px 4px;
+      border: 1px solid #ced4da;
+      border-radius: 2px;
+      font-size: 10px;
+      background: white;
+    }
+    
+    .edit-actions {
+      display: flex;
+      gap: 4px;
+      justify-content: flex-end;
+      margin-top: 4px;
+    }
+  </style>
+  <script type="module" crossorigin src="/assets/popup.html-BjyTUp9n.js"></script>
+</head>
+<body>
+  <div class="header">
+    <h1>YouTube Loop & Practice</h1>
+  </div>
+  
+  <div class="status-section">
+    <div class="status-item">
+      <span class="label">현재 페이지:</span>
+      <span class="value" id="currentPage">확인 중...</span>
+    </div>
+    <div class="status-item">
+      <span class="label">저장된 구간:</span>
+      <span class="value" id="segmentCount">0개</span>
+    </div>
+    <div class="status-item">
+      <span class="label">BPM:</span>
+      <span class="value" id="bpm">설정 안됨</span>
+    </div>
+  </div>
+  
+  <div class="actions">
+    <button class="btn btn-primary" id="togglePlay">재생/일시정지</button>
+    <button class="btn btn-primary" id="toggleLoop">루프 토글</button>
+  </div>
+  
+  <div class="controls-section">
+    <div class="control-group">
+      <label>재생 속도:</label>
+      <div class="rate-controls">
+        <button class="btn btn-small" id="decreaseRate">-</button>
+        <span id="currentRate">1.00x</span>
+        <button class="btn btn-small" id="increaseRate">+</button>
+      </div>
+    </div>
+    
+    <div class="control-group">
+      <label>구간 이동:</label>
+      <div class="segment-controls">
+        <button class="btn btn-small" id="prevSegment">이전</button>
+        <button class="btn btn-small" id="nextSegment">다음</button>
+      </div>
+    </div>
+    
+    <div class="control-group">
+      <label>BPM & 메트로놈:</label>
+      <div class="bpm-controls">
+        <input type="number" id="bpmInput" placeholder="BPM" min="60" max="200" class="bpm-input">
+        <button class="btn btn-small" id="setBpm">설정</button>
+        <button class="btn btn-small" id="tapTempo">탭 템포</button>
+        <button class="btn btn-small" id="toggleMetronome">메트로놈</button>
+      </div>
+    </div>
+    
+    <div class="control-group">
+      <label>구간 관리:</label>
+      <div class="segment-management">
+        <input type="text" id="segmentLabel" placeholder="구간 라벨" class="segment-input">
+        <button class="btn btn-small" id="createSegment">구간 생성</button>
+        <button class="btn btn-small" id="setSegmentEnd">끝점 설정</button>
+      </div>
+    </div>
+  </div>
+  
+  <div class="segments-list" id="segmentsList">
+    <!-- 구간 목록이 여기에 동적으로 추가됩니다 -->
+  </div>
+  
+</body>
+</html> 
