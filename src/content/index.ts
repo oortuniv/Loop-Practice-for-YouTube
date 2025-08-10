@@ -285,8 +285,8 @@ export class YouTubeLoopPractice {
       // 현재 시간에 해당하는 구간을 활성화
       const currentTime = this.video?.currentTime;
       
-      // currentTime이 유효하지 않은 경우 처리
-      if (currentTime === undefined || currentTime === null || isNaN(currentTime)) {
+      // currentTime이 유효하지 않은 경우 처리 (더 엄격한 검사)
+      if (currentTime === undefined || currentTime === null || isNaN(currentTime) || typeof currentTime !== 'number') {
         console.log('toggleLoop: currentTime이 유효하지 않음', currentTime);
         return;
       }
@@ -407,8 +407,8 @@ export class YouTubeLoopPractice {
     
     const currentTime = this.video.currentTime;
     
-    // currentTime이 유효하지 않은 경우 처리
-    if (currentTime === undefined || currentTime === null || isNaN(currentTime)) {
+    // currentTime이 유효하지 않은 경우 처리 (더 엄격한 검사)
+    if (currentTime === undefined || currentTime === null || isNaN(currentTime) || typeof currentTime !== 'number') {
       console.log('createSegment: currentTime이 유효하지 않음', currentTime);
       return;
     }
@@ -450,8 +450,8 @@ export class YouTubeLoopPractice {
     
     const currentTime = this.video.currentTime;
     
-    // currentTime이 유효하지 않은 경우 처리
-    if (currentTime === undefined || currentTime === null || isNaN(currentTime)) {
+    // currentTime이 유효하지 않은 경우 처리 (더 엄격한 검사)
+    if (currentTime === undefined || currentTime === null || isNaN(currentTime) || typeof currentTime !== 'number') {
       console.log('setSegmentEnd: currentTime이 유효하지 않음', currentTime);
       return;
     }

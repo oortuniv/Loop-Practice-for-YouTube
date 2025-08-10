@@ -58,8 +58,8 @@ export class LoopController {
     const { start, end } = this.active;
     const currentTime = this.video.currentTime;
     
-    // currentTime이 유효하지 않은 경우 처리
-    if (currentTime === undefined || currentTime === null || isNaN(currentTime)) {
+    // currentTime이 유효하지 않은 경우 처리 (더 엄격한 검사)
+    if (currentTime === undefined || currentTime === null || isNaN(currentTime) || typeof currentTime !== 'number') {
       console.log('루프 체크: currentTime이 유효하지 않음', currentTime);
       return;
     }
@@ -92,8 +92,8 @@ export class LoopController {
   gotoPrevNext(dir: -1 | 1): void {
     const currentTime = this.video.currentTime;
     
-    // currentTime이 유효하지 않은 경우 처리
-    if (currentTime === undefined || currentTime === null || isNaN(currentTime)) {
+    // currentTime이 유효하지 않은 경우 처리 (더 엄격한 검사)
+    if (currentTime === undefined || currentTime === null || isNaN(currentTime) || typeof currentTime !== 'number') {
       console.log('gotoPrevNext: currentTime이 유효하지 않음', currentTime);
       return;
     }
@@ -135,8 +135,8 @@ export class LoopController {
   createSegmentFromCurrentTime(type: 'start' | 'end', label?: string): LoopSegment | null {
     const currentTime = this.video.currentTime;
     
-    // currentTime이 유효하지 않은 경우 처리
-    if (currentTime === undefined || currentTime === null || isNaN(currentTime)) {
+    // currentTime이 유효하지 않은 경우 처리 (더 엄격한 검사)
+    if (currentTime === undefined || currentTime === null || isNaN(currentTime) || typeof currentTime !== 'number') {
       console.log('createSegmentFromCurrentTime: currentTime이 유효하지 않음', currentTime);
       return null;
     }
@@ -232,8 +232,8 @@ export class LoopController {
   getSegmentAtCurrentTime(): LoopSegment | undefined {
     const currentTime = this.video.currentTime;
     
-    // currentTime이 유효하지 않은 경우 처리
-    if (currentTime === undefined || currentTime === null || isNaN(currentTime)) {
+    // currentTime이 유효하지 않은 경우 처리 (더 엄격한 검사)
+    if (currentTime === undefined || currentTime === null || isNaN(currentTime) || typeof currentTime !== 'number') {
       console.log('getSegmentAtCurrentTime: currentTime이 유효하지 않음', currentTime);
       return undefined;
     }
