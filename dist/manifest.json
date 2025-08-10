@@ -16,7 +16,7 @@
   "content_scripts": [
     {
       "js": [
-        "assets/index.ts-loader-B68q8vTW.js"
+        "assets/index.ts-loader-OhHC3t23.js"
       ],
       "matches": [
         "*://*.youtube.com/watch*",
@@ -67,7 +67,7 @@
         "*://youtu.be/*"
       ],
       "resources": [
-        "assets/content-DC71zDaJ.js"
+        "assets/content-D1HZzY0w.js"
       ],
       "use_dynamic_url": false
     }

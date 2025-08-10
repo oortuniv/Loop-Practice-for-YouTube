@@ -372,8 +372,7 @@ export class YouTubeLoopPractice {
       beats: this.profile.countInBeats || 4,
       bpm: this.profile.bpm,
       onComplete: () => {
-        // currentTime이 유효한지 확인
-        if (this.video && activeSegment.start !== undefined && !isNaN(activeSegment.start)) {
+        if (this.video && typeof activeSegment.start === 'number' && !isNaN(activeSegment.start)) {
           this.video.currentTime = activeSegment.start;
           this.video.play().catch(() => {});
         } else {

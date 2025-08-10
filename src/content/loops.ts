@@ -56,6 +56,14 @@ export class LoopController {
     }
     
     const { start, end } = this.active;
+    
+    // start와 end 값이 유효하지 않은 경우 처리
+    if (start === undefined || start === null || isNaN(start) || typeof start !== 'number' ||
+        end === undefined || end === null || isNaN(end) || typeof end !== 'number') {
+      console.log('루프 체크: start 또는 end 값이 유효하지 않음', { start, end });
+      return;
+    }
+    
     const currentTime = this.video.currentTime;
     
     // currentTime이 유효하지 않은 경우 처리 (더 엄격한 검사)
@@ -106,14 +114,14 @@ export class LoopController {
       // 다음 구간: 현재 시간보다 큰 start 중 최소값
       const next = segments.find(s => s.start > currentTime) ?? segments[0];
       this.setActive(next?.id);
-      if (next) {
+      if (next && typeof next.start === 'number' && !isNaN(next.start)) {
         this.video.currentTime = next.start;
       }
     } else {
       // 이전 구간: 현재 시간보다 작은 start 중 최대값
       const prev = [...segments].reverse().find(s => s.start < currentTime) ?? segments[segments.length - 1];
       this.setActive(prev?.id);
-      if (prev) {
+      if (prev && typeof prev.start === 'number' && !isNaN(prev.start)) {
         this.video.currentTime = prev.start;
       }
     }
@@ -147,42 +155,47 @@ export class LoopController {
       : 1.0;
     
     if (type === 'start') {
-      // 현재 시간을 start로 하는 새 구간 생성
       const endTime = Math.min(currentTime + 10, this.video.duration);
       
-      // 라벨이 비어있으면 시작 시간 ~ 끝 시간을 기준으로 자동 지정
-      let finalLabel = label;
-      if (!finalLabel) {
-        const startMins = Math.floor(currentTime / 60);
-        const startSecs = Math.floor(currentTime % 60);
-        const endMins = Math.floor(endTime / 60);
-        const endSecs = Math.floor(endTime % 60);
-        finalLabel = `${startMins}:${startSecs.toString().padStart(2, '0')}~${endMins}:${endSecs.toString().padStart(2, '0')}`;
+      // endTime이 유효하지 않은 경우 처리
+      if (endTime === undefined || endTime === null || isNaN(endTime) || typeof endTime !== 'number') {
+        console.log('createSegmentFromCurrentTime: endTime이 유효하지 않음', endTime);
+        return null;
       }
       
-      const newSegment: LoopSegment = {
+      let segmentLabel = label;
+      if (!segmentLabel) {
+        const startMin = Math.floor(currentTime / 60);
+        const startSec = Math.floor(currentTime % 60);
+        const endMin = Math.floor(endTime / 60);
+        const endSec = Math.floor(endTime % 60);
+        segmentLabel = `${startMin}:${startSec.toString().padStart(2, '0')}~${endMin}:${endSec.toString().padStart(2, '0')}`;
+      }
+      
+      const segment: LoopSegment = {
         id: Math.random().toString(36).substring(2, 15),
         start: currentTime,
-        end: endTime, // 기본 10초 구간
+        end: endTime,
         rate: safeDefaultRate,
-        label: finalLabel
+        label: segmentLabel
       };
       
-      this.profile.segments.push(newSegment);
-      return newSegment;
+      this.profile.segments.push(segment);
+      return segment;
     } else {
-      // 마지막 구간의 end를 현재 시간으로 설정
+      // end 타입: 마지막 구간의 끝점을 현재 시간으로 설정
       const lastSegment = this.profile.segments[this.profile.segments.length - 1];
+      
       if (lastSegment && lastSegment.start < currentTime) {
         lastSegment.end = currentTime;
         
-        // 라벨이 비어있으면 시작 시간 ~ 끝 시간으로 업데이트
+        // 라벨이 없거나 기본 라벨인 경우 업데이트
         if (!lastSegment.label || lastSegment.label.startsWith('구간 ')) {
-          const startMins = Math.floor(lastSegment.start / 60);
-          const startSecs = Math.floor(lastSegment.start % 60);
-          const endMins = Math.floor(currentTime / 60);
-          const endSecs = Math.floor(currentTime % 60);
-          lastSegment.label = `${startMins}:${startSecs.toString().padStart(2, '0')}~${endMins}:${endSecs.toString().padStart(2, '0')}`;
+          const startMin = Math.floor(lastSegment.start / 60);
+          const startSec = Math.floor(lastSegment.start % 60);
+          const endMin = Math.floor(currentTime / 60);
+          const endSec = Math.floor(currentTime % 60);
+          lastSegment.label = `${startMin}:${startSec.toString().padStart(2, '0')}~${endMin}:${endSec.toString().padStart(2, '0')}`;
         }
         
         return lastSegment;

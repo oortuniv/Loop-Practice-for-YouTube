@@ -6,7 +6,7 @@
     "isEntry": true
   },
   "index.ts-loader.js": {
-    "file": "assets/index.ts-loader-B68q8vTW.js",
+    "file": "assets/index.ts-loader-OhHC3t23.js",
     "src": "index.ts-loader.js"
   },
   "src/background.ts": {
@@ -16,7 +16,7 @@
     "isEntry": true
   },
   "src/content/index.ts": {
-    "file": "assets/content-DC71zDaJ.js",
+    "file": "assets/content-D1HZzY0w.js",
     "name": "content",
     "src": "src/content/index.ts",
     "isEntry": true
