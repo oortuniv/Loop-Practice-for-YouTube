@@ -226,8 +226,18 @@ export class PopupController {
       try {
         console.log(`Content Script 연결 확인 시도 ${attempt}/3`);
         const response = await chrome.tabs.sendMessage(this.tab.id, { type: "PING" });
+        
         if (response && response.status === "ok") {
-          console.log("Content Script 연결 성공");
+          console.log("Content Script 연결 성공", response);
+          
+          // 초기화 상태 확인
+          if (response.initialized === false) {
+            console.log("Content Script가 아직 초기화되지 않음, 대기 중...");
+            // 초기화를 기다림
+            await new Promise(resolve => setTimeout(resolve, 500));
+            continue;
+          }
+          
           return true;
         }
         console.log("Content Script 응답이 올바르지 않음:", response);

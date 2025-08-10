@@ -21,8 +21,11 @@ export class YouTubeLoopPractice {
   private saveProfileThrottled: () => void;
 
   constructor() {
-    // 저장을 2초마다 한 번씩만 실행하도록 throttle
-    this.saveProfileThrottled = throttle(() => this.saveProfile(), 2000);
+    this.saveProfileThrottled = throttle(() => this.saveProfile(), 1000);
+    
+    // 즉시 메시지 리스너 등록 (초기화 전에도 응답 가능하도록)
+    chrome.runtime.onMessage.addListener(this.handleMessage.bind(this));
+    console.log('Content Script 메시지 리스너 등록 완료');
   }
 
   async init() {
@@ -97,7 +100,6 @@ export class YouTubeLoopPractice {
 
     // 비디오 timeupdate 이벤트
     this.video.addEventListener('timeupdate', () => {
-      console.log('timeupdate 이벤트 발생:', this.video?.currentTime);
       this.loopController?.onTimeUpdate();
     });
 
@@ -105,9 +107,6 @@ export class YouTubeLoopPractice {
 
     // 키보드 이벤트
     window.addEventListener('keydown', this.handleKeydown.bind(this));
-
-    // Chrome Extension 명령 메시지
-    chrome.runtime.onMessage.addListener(this.handleMessage.bind(this));
     
     console.log('모든 이벤트 리스너 설정 완료');
   }
@@ -168,6 +167,27 @@ export class YouTubeLoopPractice {
     try {
       console.log('Content Script 메시지 수신:', message);
       
+      // 초기화되지 않은 상태에서도 응답 가능한 메시지들
+      if (message?.type === 'PING') {
+        console.log('PING 메시지 수신, 응답 전송');
+        sendResponse({ status: 'ok', timestamp: Date.now(), initialized: this.isInitialized });
+        return true;
+      }
+      
+      if (message?.type === 'GET_CURRENT_TIME') {
+        const currentTime = this.video?.currentTime || 0;
+        console.log('현재 시간 요청:', currentTime);
+        sendResponse({ currentTime });
+        return true;
+      }
+      
+      // 초기화되지 않은 상태에서는 다른 메시지에 에러 응답
+      if (!this.isInitialized) {
+        console.log('Content Script가 초기화되지 않음, 메시지 무시:', message?.type);
+        sendResponse({ error: 'Content script not initialized' });
+        return true;
+      }
+      
       if (message?.type === 'COMMAND') {
         switch (message.command) {
           case 'toggle-play':
@@ -224,13 +244,8 @@ export class YouTubeLoopPractice {
         
         const success = this.updateSegment(message.segmentId, updates);
         sendResponse({ success });
-      } else if (message?.type === 'PING') {
-        console.log('PING 메시지 수신, 응답 전송');
-        sendResponse({ status: 'ok', timestamp: Date.now() });
       } else if (message?.type === 'GET_STATE') {
         sendResponse({ profile: this.profile });
-      } else if (message?.type === 'GET_CURRENT_TIME') {
-        sendResponse({ currentTime: this.video?.currentTime || 0 });
       } else {
         console.log('알 수 없는 메시지 타입:', message?.type);
         sendResponse({ error: 'Unknown message type' });

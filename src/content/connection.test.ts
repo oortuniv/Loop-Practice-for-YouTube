@@ -65,7 +65,8 @@ describe('Content Script 연결', () => {
     
     expect(sendResponse).toHaveBeenCalledWith({
       status: 'ok',
-      timestamp: expect.any(Number)
+      timestamp: expect.any(Number),
+      initialized: expect.any(Boolean)
     });
   });
 
@@ -87,8 +88,9 @@ describe('Content Script 연결', () => {
       segmentId: 'test-segment' 
     }, {}, sendResponse);
     
+    // 초기화되지 않은 상태에서는 에러 응답
     expect(sendResponse).toHaveBeenCalledWith({
-      success: true
+      error: 'Content script not initialized'
     });
   });
 });
