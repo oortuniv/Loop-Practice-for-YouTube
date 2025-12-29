@@ -1,6 +1,6 @@
 import { vi } from 'vitest';
 
-// Test setup for YouTube Loop & Practice Extension
+// Test setup for Loop Practice for YouTube Extension
 
 // Mock Chrome Extension APIs
 global.chrome = {

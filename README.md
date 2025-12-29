@@ -1,165 +1,174 @@
-유튜브에서 구간 반복(A-B), 구간별 속도, 자동 저장/불러오기, 단축키, 탭 템포/메트로놈/카운트인을 제공하는 Chrome MV3 확장입니다.
+# Loop Practice for YouTube
 
-핵심 기능
+> A Chrome Extension for efficient practice with YouTube videos through section looping and playback speed control.
 
-여러 구간 저장(겹침 허용), 활성 구간 반복
+YouTube 동영상으로 연습할 때 필요한 구간 반복, 속도 조절 기능을 제공하는 Chrome 확장 프로그램입니다.
 
-구간별 재생 속도 적용 + 전역 기본 속도
+## ✨ Features
 
-같은 영상 재방문 시 자동 적용
+### 🔁 Loop Management
+- **Multiple Loop Sections**: Create and manage multiple practice sections within a single video
+- **Quick Section Creation**: Create loops in 2, 4, 8, or 16 bar increments (requires tempo settings)
+- **Preset Labels**: Choose from common section names (Intro, Verse, Chorus, Bridge, Outro) or create custom labels
+- **Drag & Drop Reordering**: Reorganize your loop sections with simple drag and drop
+- **Collapsible Cards**: Collapse sections to keep your workspace clean
 
-단축키: Space(재생/일시정지), L(루프 토글), [/](이전/다음 구간), -/=(속도 ±), T(탭 템포), M(메트로놈), C(카운트인)
+### ⏯️ Playback Control
+- **Automatic Looping**: Seamlessly loops back to the start when reaching the end of a section
+- **Speed Adjustment**: Change playback speed from 0.25x to 2x for each loop section
+- **Fine-grained Time Control**: Adjust start/end times with precision using drag or manual input
 
-설치(개발용)
+### 🎵 Music Practice Features
+- **Tempo (BPM) Tracking**: Set the song's tempo for bar-based loop creation
+- **TAP Tempo**: Quickly determine BPM by tapping along with the music
+- **Time Signature Support**: Support for various time signatures (2/4, 3/4, 4/4, 5/4, 6/8, 7/8, 9/8, 12/8, 6/4)
 
-이 저장소 클론 또는 폴더 준비
+### 💾 Data Persistence
+- **Auto-save**: All settings and loop sections are automatically saved
+- **Per-video Storage**: Each video maintains its own set of loops and settings
+- **Chrome Sync**: Settings sync across your Chrome browsers (when signed in)
 
-Chrome → chrome://extensions → Developer mode On
+## 🚀 Installation
 
-Load unpacked → 이 폴더 선택
+### From Source (Development)
 
-유튜브 영상 페이지 진입 → 우하단 패널 표시
+1. **Clone the repository**
+   ```bash
+   git clone https://github.com/yourusername/loop-practice-for-youtube.git
+   cd loop-practice-for-youtube
+   ```
 
-폴더 구조
+2. **Install dependencies**
+   ```bash
+   npm install
+   ```
 
-/yt-loop-practice
-  ├─ manifest.json
-  ├─ background.js
-  ├─ content.js
-  ├─ storage.js
-  ├─ overlay.css
-  ├─ /icons
-  └─ /.cursorrules         ← Cursor 가드레일
+3. **Build the extension**
+   ```bash
+   npm run build
+   ```
 
-아키텍처 & 가드레일
+4. **Load in Chrome**
+   - Open Chrome and navigate to `chrome://extensions`
+   - Enable "Developer mode" (toggle in top right)
+   - Click "Load unpacked"
+   - Select the `dist` folder from this project
 
-Manifest V3 유지, remote code 금지
+## 📖 Usage
 
-대상 URL: youtube.com/watch*, youtu.be/* (쇼츠 제외)
+1. **Navigate to any YouTube video**
+   - The extension automatically activates on YouTube watch pages
 
-Overlay는 Shadow DOM 사용(스타일 오염 방지)
+2. **Create a loop section**
+   - Click "+ New Loop" button
+   - Choose a duration (2, 4, 8, or 16 bars) or custom time
+   - Add a label to identify the section
 
-루프 로직은 전담 모듈에서만 변경(중복 구현 금지)
+3. **Activate a loop**
+   - Click the play icon (▶) on any loop card
+   - The video will automatically loop between the start and end times
 
-저장 스키마:
+4. **Adjust settings**
+   - Set **Tempo (BPM)**: Use TAP button or type manually
+   - Set **Time Signature**: Select from dropdown
+   - Adjust **Speed**: Fine-tune playback speed per loop
 
-type LoopSegment = { id: string; start: number; end: number; rate: number; label?: string };
-type VideoProfile = {
-  videoId: string;
-  defaultRate: number;
-  segments: LoopSegment[];
-  activeSegmentId?: string | null;
-  bpm?: number;
-  countInBeats?: number;
-  metronomeEnabled?: boolean;
-  schemaVersion?: number;
-};
+5. **Manage loops**
+   - **Edit**: Click the pencil icon to rename
+   - **Delete**: Use the menu (⋮) to remove
+   - **Reorder**: Drag cards to reorganize
+   - **Collapse**: Click the chevron to minimize cards
 
-개발 워크플로우
+## ⌨️ Keyboard Shortcuts
 
-브랜치: main(배포), dev(통합), feat/*, fix/*
+*Currently disabled - can be re-enabled in future versions*
 
-커밋: Conventional Commits(feat:, fix:, refactor: 등)
+## 🛠️ Development
 
-변경 전 .cursorrules 재확인 → 범위 밖 요구사항은 ADR로 제안
+### Project Structure
+```
+src/
+├── manifest.ts              # Chrome Extension Manifest V3
+├── background.ts            # Service Worker
+├── popup.ts/html            # Extension Popup UI
+├── types.ts                 # TypeScript Type Definitions
+├── utils.ts                 # Utility Functions
+└── content/                 # Content Script (injected into YouTube)
+    ├── index.ts             # Main entry point
+    ├── loops.ts             # Loop Controller
+    ├── storage.ts           # Chrome Storage API wrapper
+    ├── ui-controller.ts     # UI Rendering & Event Handling
+    ├── ui.ts                # DOM Injection
+    └── audio/
+        └── metronome.ts     # Web Audio API Metronome
+```
 
-수락 기준(AC) 작성 예시
+### Build Commands
 
-end 경계에서 1프레임 깜빡임 제거
+```bash
+# Development build with watch mode
+npm run dev
 
-이전/다음 구간 이동과 충돌 없음
+# Production build
+npm run build
 
-권한/번들 크기 증가 없음
+# Run tests
+npm test
 
-문서/테스트 업데이트
+# Run tests in watch mode
+npm test:watch
+```
 
-테스트
+### Tech Stack
+- **TypeScript** - Type-safe development
+- **Vite** - Fast build tool
+- **Chrome Extension Manifest V3** - Latest extension platform
+- **Preact** - Lightweight UI framework
+- **Vitest** - Unit testing
+- **Web Audio API** - Audio timing features
 
-수동 시나리오(최소):
+## 📝 Notes
 
-루프 시작/종료 정확도(±0.01s 이내)
+### Current Limitations
+- Keyboard shortcuts are temporarily disabled
+- Some advanced metronome features are hidden in UI but available in code
+- Depends on YouTube's DOM structure (may break with YouTube updates)
 
-재방문 자동 적용
+### Browser Compatibility
+- Chrome/Chromium-based browsers (Edge, Brave, etc.)
+- Requires Manifest V3 support
 
-겹치는 구간 우선순위(사용자 활성 구간 우선)
+## 🤝 Contributing
 
-단축키/메트로놈/카운트인 정상 동작
+Contributions are welcome! Please feel free to submit a Pull Request.
 
-선택: Playwright로 간단 E2E 스크립트
+## 📦 Chrome Web Store Submission
 
-마이그레이션 가이드
+Ready to publish? Check out the complete submission guide:
 
-schemaVersion 도입(기본 1) → 시작 시 버전 확인 후 변환
+📁 **[store-assets/STORE_SUBMISSION_GUIDE.md](store-assets/STORE_SUBMISSION_GUIDE.md)**
 
-예:
+### Quick Checklist
+- [ ] Icons created (16x16, 48x48, 128x128)
+- [ ] Screenshots captured (1280x800, at least 1)
+- [ ] Privacy Policy published (publicly accessible URL needed)
+- [ ] Store listing description ready
+- [ ] Developer account registered ($5 one-time fee)
 
-const MIGRATIONS = {
-  1: p => p,
-  2: p => ({ ...p, countInBeats: p.countInBeats ?? 4 }),
-  3: p => ({ ...p, segments: p.segments.map(s => ({ ...s, label: s.label ?? '' })) }),
-};
+See detailed guides in `store-assets/`:
+- `ICON_DESIGN_GUIDE.md` - Icon creation instructions
+- `SCREENSHOT_GUIDE.md` - Screenshot requirements and tips
+- `STORE_LISTING.md` - Complete store description content
 
-변경 시 CHANGELOG.md에 사용자 영향 기록
+## 📄 License
 
-이슈 템플릿
+MIT License - see [LICENSE](LICENSE) file for details
 
-제목: [fix/feat] 한 줄 요약
-목적(왜):
-범위(무엇):
-비목표:
-수락 기준(AC):
-1)
-2)
-3) 권한/성능 영향 없음
-재현/검증 방법:
-리스크/롤백:
+## 🙏 Acknowledgments
 
-PR 템플릿
+- Built with [CRXJS Vite Plugin](https://crxjs.dev/vite-plugin)
+- Inspired by musicians who practice with YouTube videos
 
-## 변경 요약
-- …
+---
 
-## 스크린샷/영상
-- (있다면 첨부)
-
-## 테스트 결과
-- 유닛/E2E/수동 체크 목록
-
-## 문서/CHANGELOG
-- [ ] 업데이트 포함
-
-## 권한/성능 영향
-- 없음 / (있다면 상세)
-
-ADR 템플릿 (docs/adr/0000-template.md)
-
-# 제목
-상태: 제안/승인/폐기
-날짜: YYYY-MM-DD
-
-## 배경
-문제/상황
-
-## 대안
-- 대안 A / B / C
-
-## 결정
-선택한 안, 이유
-
-## 트레이드오프
-장단점, 리스크
-
-## 영향
-코드/권한/문서/사용자 영향
-
-## 후속 작업
-테스트/마이그레이션/릴리즈 계획
-
-릴리즈
-
-SemVer 기준 버전 증가
-
-권한 변경 시 최소 마이너 이상, 스토어 설명/스크린샷 갱신
-
-문제가 생기면 이전 태그로 즉시 롤백
-
+**Loop Practice for YouTube** - Practice smarter, not harder 🎸

@@ -1,0 +1,32 @@
+# Claude Context File
+# 새로운 Claude 세션 시작 시 자동으로 읽히는 파일
+
+## 프로젝트 개요
+YouTube Loop & Practice - Chrome Extension
+음악 연습을 위한 YouTube 비디오 구간 반복 재생 도구
+
+## 빠른 시작 가이드
+
+### 새 세션 시작할 때
+1. 이 파일 읽기 (자동)
+2. `docs/development/ARCHITECTURE.md` 읽기 - 전체 구조 파악
+3. `docs/development/sessions/YYYY-MM-DD/` 디렉토리에서 최근 세션 파일 읽기
+4. `docs/development/CHANGELOG.md` 읽기 - 최근 변경사항 확인
+
+### 주요 파일 위치
+- 아키텍처: `docs/development/ARCHITECTURE.md`
+- 변경 이력: `docs/development/CHANGELOG.md`
+- 세션 로그: `docs/development/sessions/`
+
+### 현재 상태 (2025-12-29)
+- ✅ 모든 UI 개선 및 버그 수정 완료
+- ✅ 빌드 성공
+- ⏸️ 실제 Chrome Extension 테스트 필요
+
+### 다음 작업
+1. Chrome Extension 환경에서 테스트
+2. 사용자 피드백 수집
+3. 추가 버그 수정 (있다면)
+
+---
+더 자세한 내용은 `docs/development/` 디렉토리 참조

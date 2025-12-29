@@ -1,7 +1,7 @@
 {
-  "name": "youtube-loop-practice",
+  "name": "loop-practice-for-youtube",
   "version": "0.1.0",
-  "description": "YouTube Loop & Practice Chrome Extension",
+  "description": "Loop Practice for YouTube - Chrome Extension for loop practice with tempo control",
   "type": "module",
   "scripts": {
     "dev": "vite",

@@ -13,9 +13,7 @@ export async function loadProfile(videoId: string): Promise<VideoProfile> {
     videoId, 
     defaultRate: 1.0, 
     segments: [], 
-    activeSegmentId: null, 
-    countInBeats: 4, 
-    metronomeEnabled: false 
+    activeSegmentId: null
   };
   
   await chrome.storage.sync.set({ [key]: fresh });
