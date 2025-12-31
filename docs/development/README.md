@@ -39,6 +39,5 @@ docs/development/
 
 ```
 "docs/development/ARCHITECTURE.md와
-docs/development/sessions/2025-12-29/ 디렉토리의
-가장 최근 파일을 읽고 작업을 이어가고 싶어"
+docs/development/sessions 이하 디렉토리의 파일을 읽고 작업을 이어가고 싶어"
 ```
