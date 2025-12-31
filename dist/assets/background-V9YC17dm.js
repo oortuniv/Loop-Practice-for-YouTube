@@ -1,1 +1,0 @@
-chrome.runtime.onMessage.addListener((e,o,n)=>{console.log("Background received message:",e)});chrome.runtime.onInstalled.addListener(e=>{e.reason==="install"?console.log("Loop Practice for YouTube 확장프로그램이 설치되었습니다"):e.reason==="update"&&console.log("Loop Practice for YouTube 확장프로그램이 업데이트되었습니다")});

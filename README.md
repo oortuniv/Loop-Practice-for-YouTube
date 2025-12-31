@@ -162,7 +162,9 @@ See detailed guides in `store-assets/`:
 
 ## 📄 License
 
-MIT License - see [LICENSE](LICENSE) file for details
+Copyright (c) 2025 oortuniv. All Rights Reserved.
+
+This is proprietary software. See [LICENSE](LICENSE) file for details.
 
 ## 🙏 Acknowledgments
 
