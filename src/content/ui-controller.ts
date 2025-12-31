@@ -49,9 +49,21 @@ export class UIController {
    * UI를 렌더링합니다.
    */
   private render() {
+    // 렌더링 전 스크롤 위치 저장
+    const segmentsList = this.ui.querySelector('.segments-list');
+    const scrollTop = segmentsList?.scrollTop || 0;
+
     const html = this.getHTML();
     const styles = this.getStyles();
     this.ui.render(html, styles);
+
+    // 렌더링 후 스크롤 위치 복원
+    if (scrollTop > 0) {
+      const newSegmentsList = this.ui.querySelector('.segments-list');
+      if (newSegmentsList) {
+        newSegmentsList.scrollTop = scrollTop;
+      }
+    }
   }
 
   /**

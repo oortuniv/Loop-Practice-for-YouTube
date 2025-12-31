@@ -13,6 +13,11 @@ YouTube Loop & Practice - Chrome Extension
 3. `docs/development/sessions/YYYY-MM-DD/` 디렉토리에서 최근 세션 파일 읽기
 4. `docs/development/CHANGELOG.md` 읽기 - 최근 변경사항 확인
 
+### 세션 종료 시
+1. 현재 작업 내용을 `docs/development/sessions/YYYY-MM-DD/` 세션 문서에 기록
+2. 주요 변경사항은 `docs/development/CHANGELOG.md`에 업데이트
+3. 아키텍처 변경이 있다면 `docs/development/ARCHITECTURE.md` 업데이트
+
 ### 주요 파일 위치
 - 아키텍처: `docs/development/ARCHITECTURE.md`
 - 변경 이력: `docs/development/CHANGELOG.md`

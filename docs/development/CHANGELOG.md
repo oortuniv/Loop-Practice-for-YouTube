@@ -6,6 +6,43 @@
 
 ## [Unreleased]
 
+### 2025-12-31 (Session 01 - Deployment Automation and Licensing)
+
+#### Added
+- 🚀 **GitHub Actions 배포 자동화**
+  - 태그 기반 자동 빌드 및 GitHub Release 생성 (`.github/workflows/build-on-tag.yml`)
+  - main 브랜치 푸시 시 Artifacts 생성 (`.github/workflows/build-on-main.yml`)
+  - manifest.ts 버전 자동 동기화
+  - npm version 기반 버전 관리
+  - 파일: `.github/workflows/build-on-tag.yml`, `.github/workflows/build-on-main.yml`
+
+- 📝 **배포 문서화**
+  - `docs/DEPLOYMENT.md` - 배포 자동화 가이드 (개인 개발자용 간소화)
+  - `docs/CHROME_STORE_DESCRIPTION.md` - Chrome Web Store 설명 백업
+  - `docs/development/sessions/2025-12-31/session-01-deployment-automation-and-licensing.md`
+
+#### Changed
+- 📜 **라이선스 변경: MIT → Proprietary**
+  - 상업적 보호를 위해 독점 라이선스로 변경
+  - LICENSE, README.md, package.json 업데이트
+  - Public Repo 유지 (신뢰도 + Chrome 심사 편의성)
+  - 파일: `LICENSE`, `README.md`, `package.json`
+
+- 🌿 **브랜치 전략 간소화**
+  - develop 브랜치 제거 (개인 개발자에게 불필요)
+  - main + feature 브랜치 전략 채택
+  - docs/DEPLOYMENT.md 업데이트
+
+- 🧹 **Git 저장소 정리**
+  - .gitignore 업데이트: dist/, downloads/, *.zip, .DS_Store 추가
+  - Git 추적에서 빌드 아티팩트 제거
+  - 파일: `.gitignore`
+
+- 📦 **Chrome Web Store 설명 수정**
+  - "Open source" 표현 제거 (Proprietary License와 일치)
+  - 과장된 표현 제거
+  - 파일: `docs/CHROME_STORE_DESCRIPTION.md`
+
 ### 2025-12-29 (Session 02 - Part 8 Final)
 
 #### Changed
