@@ -13,6 +13,7 @@ export class UIController {
   private draggedSegmentId: string | null = null; // 드래그 중인 세그먼트 ID
   private globalSyncMetronomeEnabled: boolean = false; // 글로벌 싱크 메트로놈 상태
   private lastClickTime: Map<string, number> = new Map(); // 더블클릭 감지용 마지막 클릭 시간
+  private openBarsDropdownId: string | null = null; // 현재 열린 bars 드롭다운 ID
 
   constructor() {
     this.ui = new YouTubeUI();
@@ -176,66 +177,10 @@ export class UIController {
     const timeSignature = this.profile.timeSignature;
     const duration = endTime - startTime;
     const bars = secondsToBars(duration, bpm, timeSignature);
-    const roundedBars = Math.max(1, Math.min(16, Math.round(bars))); // 1-16 범위로 제한
+    const roundedBars = Math.max(1, Math.min(32, Math.round(bars))); // 1-32 범위로 제한
 
-    // 1부터 16까지 모든 양의 정수 옵션 생성
-    const options = Array.from({ length: 16 }, (_, i) => {
-      const barCount = i + 1;
-      const selected = barCount === roundedBars ? 'selected' : '';
-      return `<option value="${barCount}" ${selected}>${barCount} bar${barCount > 1 ? 's' : ''}</option>`;
-    }).join('');
-
-    return `
-      <select class="bar-select" data-segment-id="${segmentId}">
-        ${options}
-      </select>
-    `;
-  }
-
-  /**
-   * 스마트 듀레이션 드롭다운 옵션을 생성합니다.
-   * BPM/박자표 설정 여부에 따라 bar 옵션을 표시하거나 숨깁니다.
-   */
-  private getDurationOptions(): string {
-    const hasTempoSettings = this.profile?.tempo && this.profile?.timeSignature;
-
-    if (!hasTempoSettings) {
-      // BPM/박자표 미설정: 초 단위만 표시
-      return `
-        <option value="5">5 seconds</option>
-        <option value="10" selected>10 seconds</option>
-        <option value="20">20 seconds</option>
-        <option value="30">30 seconds</option>
-        <option value="60">60 seconds</option>
-        <option disabled>─ Set tempo for bar mode ─</option>
-      `;
-    }
-
-    // BPM/박자표 설정됨: Bar 옵션 우선 표시
-    const bpm = this.profile?.tempo || 120;
-    const timeSignature = this.profile?.timeSignature || '4/4';
-
-    // 1부터 16까지 모든 양의 정수 bar 옵션 생성
-    const barOptions = Array.from({ length: 16 }, (_, i) => {
-      const bars = i + 1;
-      const seconds = barsToSeconds(bars, bpm, timeSignature);
-      const label = bars === 1 ? '1 bar' : `${bars} bars`;
-      const selected = bars === 8 ? 'selected' : ''; // 기본값 8 bars
-      return `<option value="bar:${bars}" ${selected}>${label} (${seconds.toFixed(1)}s)</option>`;
-    }).join('');
-
-    return `
-      <optgroup label="Bars (Recommended)">
-        ${barOptions}
-      </optgroup>
-      <optgroup label="Seconds">
-        <option value="5">5 seconds</option>
-        <option value="10">10 seconds</option>
-        <option value="20">20 seconds</option>
-        <option value="30">30 seconds</option>
-        <option value="60">60 seconds</option>
-      </optgroup>
-    `;
+    // 커스텀 드롭다운 사용
+    return this.getCustomBarsDropdownHTML(`bar-select-${segmentId}`, roundedBars, 'bar-select', segmentId);
   }
 
   /**
@@ -365,9 +310,7 @@ export class UIController {
                     <div class="label-option" data-value="Outro">Outro</div>
                   </div>
                 </div>
-                <select id="loopDuration" class="segment-input duration-select">
-                  ${this.getDurationOptions()}
-                </select>
+                ${this.getCustomBarsDropdownHTML('loopDuration', 'bar:8', 'duration')}
                 <button class="btn btn-small btn-primary" id="createSegment">Create</button>
               </div>
             </div>
@@ -514,11 +457,11 @@ export class UIController {
     }
 
     return `
-      <button class="btn-add-8-bars" data-segment-id="${segmentId}" data-action="add-8-bars" title="Add 8 bars after this loop">
+      <button class="btn-add-8-bars" data-segment-id="${segmentId}" data-action="add-8-bars" title="Create 8 bars loop after this">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
           <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/>
         </svg>
-        <span>Add 8 bars</span>
+        <span>Create 8 bars loop</span>
       </button>
     `;
   }
@@ -1204,6 +1147,132 @@ export class UIController {
         border-color: #065fd4;
       }
 
+      /* Custom Bars Dropdown */
+      .custom-bars-dropdown {
+        position: relative;
+        display: inline-block;
+      }
+
+      .bars-dropdown-trigger {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 4px 6px;
+        border: 1px solid ${inputBorder};
+        border-radius: 2px;
+        background: ${inputBg};
+        color: ${textPrimary};
+        font-size: 10px;
+        cursor: pointer;
+        min-width: 65px;
+        gap: 4px;
+      }
+
+      .bars-dropdown-trigger:hover {
+        border-color: ${textSecondary};
+      }
+
+      .bars-dropdown-trigger:focus {
+        outline: none;
+        border-color: #065fd4;
+      }
+
+      .bars-arrow {
+        width: 10px;
+        height: 10px;
+        transition: transform 0.15s;
+        flex-shrink: 0;
+      }
+
+      .bars-dropdown-trigger.open .bars-arrow {
+        transform: rotate(180deg);
+      }
+
+      .bars-dropdown-panel {
+        position: fixed;
+        min-width: 100px;
+        background: ${bgPrimary};
+        border: 1px solid ${borderColor};
+        border-radius: 4px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        z-index: 10000;
+        overflow: hidden;
+      }
+
+      .scroll-indicator {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 4px;
+        background: ${bgSecondary};
+        color: ${textSecondary};
+        font-size: 10px;
+        cursor: pointer;
+        user-select: none;
+      }
+
+      .scroll-indicator:hover {
+        background: ${hoverBg};
+        color: ${textPrimary};
+      }
+
+      .scroll-indicator.hidden {
+        display: none;
+      }
+
+      .scroll-up {
+        border-bottom: 1px solid ${borderColor};
+      }
+
+      .scroll-down {
+        border-top: 1px solid ${borderColor};
+      }
+
+      .bars-options-container {
+        max-height: 200px;
+        overflow-y: auto;
+        scrollbar-width: thin;
+      }
+
+      .bars-options-container::-webkit-scrollbar {
+        width: 6px;
+      }
+
+      .bars-options-container::-webkit-scrollbar-thumb {
+        background: ${borderColor};
+        border-radius: 3px;
+      }
+
+      .bars-section-label {
+        padding: 6px 10px 4px;
+        font-size: 9px;
+        font-weight: 600;
+        color: ${textSecondary};
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        background: ${bgSecondary};
+        position: sticky;
+        top: 0;
+      }
+
+      .bars-option {
+        padding: 6px 10px;
+        font-size: 11px;
+        color: ${textPrimary};
+        cursor: pointer;
+        transition: background 0.1s;
+      }
+
+      .bars-option:hover {
+        background: ${hoverBg};
+      }
+
+      .bars-option.selected {
+        background: ${this.isDarkTheme ? '#065fd430' : '#065fd420'};
+        color: #065fd4;
+        font-weight: 500;
+      }
+
       .time-input:focus {
         outline: none;
         border-color: #065fd4;
@@ -1394,16 +1463,13 @@ export class UIController {
       }
 
       .menu-dropdown {
-        position: absolute;
-        top: 100%;
-        right: 0;
-        margin-top: 4px;
+        position: fixed;
         background: ${bgPrimary};
         border: 1px solid ${borderColor};
         border-radius: 8px;
         box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
         min-width: 120px;
-        z-index: 1000;
+        z-index: 10000;
         overflow: hidden;
       }
 
@@ -1556,7 +1622,25 @@ export class UIController {
       if (labelWrapper && !labelWrapper.contains(e.target as Node)) {
         this.closeLabelDropdown();
       }
+
+      // bars 드롭다운도 외부 클릭 시 닫기
+      if (this.openBarsDropdownId) {
+        const openDropdown = this.ui.querySelector(`[data-dropdown-id="${this.openBarsDropdownId}"]`);
+        if (openDropdown && !openDropdown.contains(e.target as Node)) {
+          this.closeAllBarsDropdowns();
+        }
+      }
     });
+
+    // 페이지 스크롤 시 bars 드롭다운 닫기 (fixed position이므로 스크롤 시 위치 어긋남 방지)
+    window.addEventListener('scroll', () => {
+      if (this.openBarsDropdownId) {
+        this.closeAllBarsDropdowns();
+      }
+    }, true); // capture phase로 모든 스크롤 이벤트 감지
+
+    // 커스텀 bars 드롭다운 이벤트 설정
+    this.setupBarsDropdownListeners();
 
     // Tempo 입력
     const tempoInput = this.ui.querySelector<HTMLInputElement>('#tempoInput');
@@ -1685,10 +1769,12 @@ export class UIController {
    */
   private handleCreateSegment() {
     const labelInput = this.ui.querySelector<HTMLInputElement>('#segmentLabel');
-    const durationSelect = this.ui.querySelector<HTMLSelectElement>('#loopDuration');
+    // 커스텀 드롭다운에서 값 가져오기
+    const durationDropdown = this.ui.querySelector('[data-dropdown-id="loopDuration"]');
+    const durationTrigger = durationDropdown?.querySelector('.bars-dropdown-trigger') as HTMLElement;
 
     const label = labelInput?.value?.trim() || '';
-    const durationValue = durationSelect?.value || '10';
+    const durationValue = durationTrigger?.getAttribute('data-value') || 'bar:8';
 
     this.onCommand?.('create-segment', { label, duration: durationValue });
 
@@ -1803,6 +1889,9 @@ export class UIController {
     const menu = this.ui.querySelector(`.menu-dropdown[data-segment-id="${segmentId}"]`) as HTMLElement;
     if (!menu) return;
 
+    const menuBtn = this.ui.querySelector(`.btn-menu[data-segment-id="${segmentId}"]`) as HTMLElement;
+    if (!menuBtn) return;
+
     const isOpen = menu.style.display !== 'none';
 
     // 모든 메뉴 닫기
@@ -1810,21 +1899,57 @@ export class UIController {
 
     // 현재 메뉴가 닫혀있었다면 열기
     if (!isOpen) {
+      // position: fixed를 위해 버튼 위치 기준으로 메뉴 위치 계산
+      const btnRect = menuBtn.getBoundingClientRect();
+      const menuHeight = 80; // 대략적인 메뉴 높이 (2개 아이템)
+      const spaceBelow = window.innerHeight - btnRect.bottom;
+
       menu.style.display = 'block';
+
+      // 아래 공간이 부족하면 위로 열기
+      if (spaceBelow < menuHeight + 10) {
+        menu.style.top = `${btnRect.top - menuHeight - 4}px`;
+      } else {
+        menu.style.top = `${btnRect.bottom + 4}px`;
+      }
+      menu.style.right = `${window.innerWidth - btnRect.right}px`;
+
+      // 클린업 함수
+      const cleanup = () => {
+        document.removeEventListener('click', closeOnOutsideClick);
+        window.removeEventListener('scroll', closeOnScroll, true);
+        window.removeEventListener('wheel', closeOnWheel, true);
+      };
 
       // 외부 클릭 시 메뉴 닫기
       const closeOnOutsideClick = (e: MouseEvent) => {
         const target = e.target as HTMLElement;
         if (!target.closest('.menu-container')) {
           this.closeAllMenus();
-          document.removeEventListener('click', closeOnOutsideClick);
+          cleanup();
         }
       };
 
-      // 약간의 딜레이 후 이벤트 리스너 등록 (현재 클릭 이벤트와 충돌 방지)
+      // 스크롤 시 메뉴 닫기
+      const closeOnScroll = () => {
+        this.closeAllMenus();
+        cleanup();
+      };
+
+      // 휠 이벤트 시 메뉴 닫기 (YouTube 페이지 스크롤 감지용)
+      const closeOnWheel = () => {
+        this.closeAllMenus();
+        cleanup();
+      };
+
+      // 약간의 딜레이 후 클릭 리스너 등록 (현재 클릭 이벤트와 충돌 방지)
       setTimeout(() => {
         document.addEventListener('click', closeOnOutsideClick);
       }, 0);
+
+      // 스크롤/휠 리스너는 즉시 등록
+      window.addEventListener('scroll', closeOnScroll, true);
+      window.addEventListener('wheel', closeOnWheel, true);
     }
   }
 
@@ -2818,6 +2943,345 @@ export class UIController {
       dropdown.style.display = 'none';
     }
   }
+
+  // ========== Custom Bars Dropdown Methods ==========
+
+  /**
+   * 커스텀 Bars 드롭다운 이벤트 리스너 설정
+   */
+  private setupBarsDropdownListeners() {
+    // 모든 커스텀 드롭다운에 이벤트 리스너 추가
+    const dropdowns = this.ui.querySelectorAll('.custom-bars-dropdown');
+    dropdowns.forEach(dropdown => {
+      const dropdownId = dropdown.getAttribute('data-dropdown-id');
+      if (!dropdownId) return;
+
+      // 트리거 클릭 - 드롭다운 토글
+      const trigger = dropdown.querySelector('.bars-dropdown-trigger');
+      if (trigger) {
+        trigger.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this.toggleBarsDropdown(dropdownId);
+        });
+      }
+
+      // 옵션 클릭 - 값 선택
+      const optionsContainer = dropdown.querySelector('.bars-options-container');
+      if (optionsContainer) {
+        optionsContainer.addEventListener('click', (e) => {
+          const target = e.target as HTMLElement;
+          if (target.classList.contains('bars-option')) {
+            const value = target.getAttribute('data-value');
+            if (value) {
+              this.handleBarsOptionSelect(dropdown, value);
+            }
+          }
+        });
+      }
+
+      // 스크롤 인디케이터 호버 시 자동 스크롤
+      const scrollUp = dropdown.querySelector('.scroll-up');
+      const scrollDown = dropdown.querySelector('.scroll-down');
+
+      if (scrollUp) {
+        scrollUp.addEventListener('mouseenter', () => {
+          this.startBarsAutoScroll(dropdown, 'up');
+        });
+        scrollUp.addEventListener('mouseleave', () => {
+          this.stopBarsAutoScroll();
+        });
+      }
+
+      if (scrollDown) {
+        scrollDown.addEventListener('mouseenter', () => {
+          this.startBarsAutoScroll(dropdown, 'down');
+        });
+        scrollDown.addEventListener('mouseleave', () => {
+          this.stopBarsAutoScroll();
+        });
+      }
+    });
+  }
+
+  private barsAutoScrollInterval: number | null = null;
+
+  /**
+   * 자동 스크롤 시작
+   */
+  private startBarsAutoScroll(dropdown: Element, direction: 'up' | 'down') {
+    this.stopBarsAutoScroll();
+
+    const container = dropdown.querySelector('.bars-options-container') as HTMLElement;
+    if (!container) return;
+
+    const scrollStep = 3; // 스크롤 속도 (픽셀)
+    const scrollInterval = 16; // 약 60fps
+
+    this.barsAutoScrollInterval = window.setInterval(() => {
+      if (direction === 'up') {
+        container.scrollTop -= scrollStep;
+      } else {
+        container.scrollTop += scrollStep;
+      }
+      this.updateBarsScrollIndicators(dropdown);
+    }, scrollInterval);
+  }
+
+  /**
+   * 자동 스크롤 중지
+   */
+  private stopBarsAutoScroll() {
+    if (this.barsAutoScrollInterval) {
+      clearInterval(this.barsAutoScrollInterval);
+      this.barsAutoScrollInterval = null;
+    }
+  }
+
+  /**
+   * 커스텀 Bars 드롭다운 HTML 생성
+   */
+  private getCustomBarsDropdownHTML(
+    id: string,
+    currentValue: string | number,
+    type: 'duration' | 'bar-select',
+    segmentId?: string
+  ): string {
+    // 현재 값 표시 텍스트
+    let displayText = '';
+    let currentBarValue: number | null = null;
+
+    if (type === 'bar-select') {
+      const bars = typeof currentValue === 'number' ? currentValue : parseInt(currentValue as string, 10);
+      currentBarValue = bars;
+      displayText = `${bars} bar${bars > 1 ? 's' : ''}`;
+    } else {
+      if (String(currentValue).startsWith('bar:')) {
+        const bars = parseInt(String(currentValue).split(':')[1], 10);
+        currentBarValue = bars;
+        displayText = `${bars} bar${bars > 1 ? 's' : ''}`;
+      } else {
+        displayText = `${currentValue}s`;
+      }
+    }
+
+    // 1-32 bars 옵션 생성 (초 표시 제거)
+    const barsOptions = Array.from({ length: 32 }, (_, i) => {
+      const bars = i + 1;
+      const value = type === 'duration' ? `bar:${bars}` : String(bars);
+      const label = `${bars} bar${bars > 1 ? 's' : ''}`;
+      const isSelected = currentBarValue === bars;
+      return `<div class="bars-option ${isSelected ? 'selected' : ''}" data-value="${value}">${label}</div>`;
+    }).join('');
+
+    // Seconds 옵션 (duration용만)
+    const secondsSection = type === 'duration' ? `
+      <div class="bars-section-label">Seconds</div>
+      <div class="bars-option ${currentValue === '5' || currentValue === 5 ? 'selected' : ''}" data-value="5">5 seconds</div>
+      <div class="bars-option ${currentValue === '10' || currentValue === 10 ? 'selected' : ''}" data-value="10">10 seconds</div>
+      <div class="bars-option ${currentValue === '20' || currentValue === 20 ? 'selected' : ''}" data-value="20">20 seconds</div>
+      <div class="bars-option ${currentValue === '30' || currentValue === 30 ? 'selected' : ''}" data-value="30">30 seconds</div>
+      <div class="bars-option ${currentValue === '60' || currentValue === 60 ? 'selected' : ''}" data-value="60">60 seconds</div>
+    ` : '';
+
+    const dataAttrs = segmentId ? `data-segment-id="${segmentId}"` : '';
+
+    return `
+      <div class="custom-bars-dropdown" data-dropdown-id="${id}" ${dataAttrs}>
+        <button class="bars-dropdown-trigger" type="button" data-value="${currentValue}">
+          <span class="bars-value">${displayText}</span>
+          <svg class="bars-arrow" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M7 10l5 5 5-5z"/>
+          </svg>
+        </button>
+        <div class="bars-dropdown-panel" style="display: none;">
+          <div class="scroll-indicator scroll-up hidden">
+            <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor">
+              <path d="M7 14l5-5 5 5z"/>
+            </svg>
+          </div>
+          <div class="bars-options-container">
+            <div class="bars-section-label">Bars (1-32)</div>
+            ${barsOptions}
+            ${secondsSection}
+          </div>
+          <div class="scroll-indicator scroll-down">
+            <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor">
+              <path d="M7 10l5 5 5-5z"/>
+            </svg>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  /**
+   * 커스텀 드롭다운 토글
+   */
+  private toggleBarsDropdown(dropdownId: string) {
+    const dropdown = this.ui.querySelector(`[data-dropdown-id="${dropdownId}"]`) as HTMLElement;
+    if (!dropdown) return;
+
+    const panel = dropdown.querySelector('.bars-dropdown-panel') as HTMLElement;
+    const trigger = dropdown.querySelector('.bars-dropdown-trigger') as HTMLElement;
+
+    if (!panel || !trigger) return;
+
+    const isOpen = panel.style.display !== 'none';
+
+    // 다른 드롭다운 모두 닫기
+    this.closeAllBarsDropdowns();
+
+    if (!isOpen) {
+      // 트리거 버튼의 위치를 기준으로 패널 위치 계산 (fixed position 사용)
+      const triggerRect = trigger.getBoundingClientRect();
+      panel.style.top = `${triggerRect.bottom + 2}px`;
+      panel.style.left = `${triggerRect.left}px`;
+      panel.style.minWidth = `${triggerRect.width}px`;
+
+      panel.style.display = 'block';
+      trigger.classList.add('open');
+      this.openBarsDropdownId = dropdownId;
+
+      // 현재 선택된 옵션으로 스크롤
+      this.scrollToSelectedBarsOption(dropdown);
+
+      // 스크롤 인디케이터 업데이트
+      this.updateBarsScrollIndicators(dropdown);
+
+      // 스크롤 이벤트 리스너 추가
+      const container = dropdown.querySelector('.bars-options-container') as HTMLElement;
+      if (container) {
+        container.addEventListener('scroll', () => this.updateBarsScrollIndicators(dropdown));
+      }
+    }
+  }
+
+  /**
+   * 모든 커스텀 드롭다운 닫기
+   */
+  private closeAllBarsDropdowns() {
+    const dropdowns = this.ui.querySelectorAll('.custom-bars-dropdown');
+    dropdowns.forEach(dropdown => {
+      const panel = dropdown.querySelector('.bars-dropdown-panel') as HTMLElement;
+      const trigger = dropdown.querySelector('.bars-dropdown-trigger') as HTMLElement;
+      if (panel) panel.style.display = 'none';
+      if (trigger) trigger.classList.remove('open');
+    });
+    this.openBarsDropdownId = null;
+  }
+
+  /**
+   * 선택된 옵션으로 스크롤
+   */
+  private scrollToSelectedBarsOption(dropdown: Element) {
+    const container = dropdown.querySelector('.bars-options-container') as HTMLElement;
+    const selected = dropdown.querySelector('.bars-option.selected') as HTMLElement;
+
+    if (container && selected) {
+      // 선택된 옵션이 중앙에 오도록 스크롤
+      const containerHeight = container.clientHeight;
+      const selectedTop = selected.offsetTop;
+      const selectedHeight = selected.offsetHeight;
+
+      container.scrollTop = selectedTop - (containerHeight / 2) + (selectedHeight / 2);
+    }
+  }
+
+  /**
+   * 스크롤 인디케이터 업데이트
+   */
+  private updateBarsScrollIndicators(dropdown: Element) {
+    const container = dropdown.querySelector('.bars-options-container') as HTMLElement;
+    const upIndicator = dropdown.querySelector('.scroll-up') as HTMLElement;
+    const downIndicator = dropdown.querySelector('.scroll-down') as HTMLElement;
+
+    if (!container || !upIndicator || !downIndicator) return;
+
+    const { scrollTop, scrollHeight, clientHeight } = container;
+
+    // 상단 인디케이터: 위로 스크롤 가능할 때 표시
+    if (scrollTop > 10) {
+      upIndicator.classList.remove('hidden');
+    } else {
+      upIndicator.classList.add('hidden');
+    }
+
+    // 하단 인디케이터: 아래로 스크롤 가능할 때 표시
+    if (scrollTop < scrollHeight - clientHeight - 10) {
+      downIndicator.classList.remove('hidden');
+    } else {
+      downIndicator.classList.add('hidden');
+    }
+  }
+
+  /**
+   * 드롭다운 옵션 선택 처리
+   */
+  private handleBarsOptionSelect(dropdown: Element, value: string) {
+    const dropdownId = dropdown.getAttribute('data-dropdown-id');
+    const segmentId = dropdown.getAttribute('data-segment-id');
+    const trigger = dropdown.querySelector('.bars-dropdown-trigger') as HTMLElement;
+
+    // duration-select인 경우
+    if (dropdownId === 'loopDuration') {
+      if (trigger) {
+        trigger.setAttribute('data-value', value);
+        const valueSpan = trigger.querySelector('.bars-value') as HTMLElement;
+        if (valueSpan) {
+          valueSpan.textContent = this.formatBarsDropdownValue(value, 'duration');
+        }
+      }
+    }
+    // bar-select인 경우
+    else if (segmentId) {
+      const barValue = parseInt(value, 10);
+      if (!isNaN(barValue) && barValue >= 1 && barValue <= 32) {
+        if (trigger) {
+          trigger.setAttribute('data-value', value);
+          const valueSpan = trigger.querySelector('.bars-value') as HTMLElement;
+          if (valueSpan) {
+            valueSpan.textContent = this.formatBarsDropdownValue(value, 'bar-select');
+          }
+        }
+
+        // End 시간 업데이트
+        const segment = this.profile?.segments.find(s => s.id === segmentId);
+        if (segment && this.profile?.tempo && this.profile?.timeSignature) {
+          const newDuration = barsToSeconds(barValue, this.profile.tempo, this.profile.timeSignature);
+          const newEndTime = segment.start + newDuration;
+          this.onCommand?.('update-time', { segmentId, timeType: 'end', time: newEndTime });
+        }
+      }
+    }
+
+    // 선택 상태 업데이트
+    const options = dropdown.querySelectorAll('.bars-option');
+    options.forEach(opt => {
+      opt.classList.toggle('selected', opt.getAttribute('data-value') === value);
+    });
+
+    // 드롭다운 닫기
+    this.closeAllBarsDropdowns();
+  }
+
+  /**
+   * 드롭다운 값 포맷팅
+   */
+  private formatBarsDropdownValue(value: string, type: 'duration' | 'bar-select'): string {
+    if (type === 'bar-select') {
+      const bars = parseInt(value, 10);
+      return `${bars} bar${bars > 1 ? 's' : ''}`;
+    }
+
+    if (value.startsWith('bar:')) {
+      const bars = parseInt(value.split(':')[1], 10);
+      return `${bars} bar${bars > 1 ? 's' : ''}`;
+    }
+
+    return `${value}s`;
+  }
+
+  // ========== End Custom Bars Dropdown Methods ==========
 
   /**
    * 특정 세그먼트로 스크롤합니다.

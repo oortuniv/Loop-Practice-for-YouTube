@@ -6,6 +6,16 @@
 
 ## [Unreleased]
 
+### 2026-01-01 (Session 03 - Custom Bars Dropdown UI)
+
+#### Changed
+- 🔄 **Bars 선택 UI를 커스텀 드롭다운으로 개선**
+  - 1-32 bars까지 확장 지원 (기존 1-16)
+  - 스크롤 가능한 커스텀 드롭다운 UI
+  - 위/아래 화살표 인디케이터로 스크롤 가능 여부 표시
+  - 두 곳 모두 적용: 루프 생성 Duration + 개별 세그먼트 bar-select
+  - 파일: `src/content/ui-controller.ts`
+
 ### 2026-01-01 (Session 02 - TAP Tempo Algorithm Improvements)
 
 #### Changed
