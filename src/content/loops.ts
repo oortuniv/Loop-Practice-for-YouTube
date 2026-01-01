@@ -108,9 +108,19 @@ export class LoopController {
       const foundSegment = profile.segments.find(s => s.id === profile.activeSegmentId);
       console.log('setProfile에서 찾은 구간:', foundSegment);
       this.active = foundSegment || undefined;
+
+      // 중요: 메트로놈 루프 범위를 즉시 업데이트해야 함
+      // 메트로놈이 10ms마다 폴링하므로, 이전 루프 범위로 점프 감지가 발생하지 않도록
+      if (this.active) {
+        this.metronome.setLoopRange(this.active.start, this.active.end);
+        // 주의: 여기서 resync()를 호출하면 안 됨
+        // video.currentTime이 아직 이전 위치일 수 있음
+        // resync()는 video.currentTime 변경 후 jumpAndActivateSegment에서 처리됨
+      }
     } else {
       this.active = undefined;
-      // 루프 비활성화 시 메트로놈 중지
+      // 루프 비활성화 시 메트로놈 중지 및 범위 해제
+      this.metronome.clearLoopRange();
       if (this.metronome.isRunning()) {
         this.stopMetronome();
       }
@@ -144,14 +154,22 @@ export class LoopController {
     if (this.active) {
       console.log(`루프 활성화: ${this.active.label} (${this.active.start}s ~ ${this.active.end}s)`);
 
-      // 메트로놈이 활성화되어 있고 비디오가 재생 중이면 재시작
-      if (this.active.metronomeEnabled && !this.video.paused) {
-        this.stopMetronome();
-        this.startMetronome();
+      // 중요: 메트로놈 루프 범위를 가장 먼저 설정해야 함
+      // 메트로놈이 10ms마다 폴링하므로, 이전 루프 범위로 점프 감지가 발생하지 않도록
+      // 새 루프 범위를 즉시 설정
+      this.metronome.setLoopRange(this.active.start, this.active.end);
+
+      // 메트로놈이 이미 실행 중이면 새 루프 범위에 맞게 resync
+      // (더블비트 방지를 위해 resync 사용)
+      if (this.metronome.isRunning()) {
+        this.metronome.resync(this.video.currentTime);
       }
 
-      // 메트로놈 루프 범위 설정 (loopEnd 도달 시 handleLoopJump 호출)
-      this.metronome.setLoopRange(this.active.start, this.active.end);
+      // 메트로놈이 활성화되어 있고 비디오가 재생 중이면 시작
+      // (이미 실행 중이면 위에서 resync만 수행)
+      if (this.active.metronomeEnabled && !this.video.paused && !this.metronome.isRunning()) {
+        this.startMetronome();
+      }
     } else {
       console.log('루프 비활성화');
 
@@ -553,6 +571,17 @@ export class LoopController {
     this.globalSyncMetronomeActive = false;
     this.metronome.stop();
     console.log('[Global Sync Metronome] 중지');
+  }
+
+  /**
+   * 메트로놈이 실행 중이면 resync 수행 (더블비트 방지)
+   * @param videoTime 새로운 video.currentTime
+   */
+  resyncMetronomeIfRunning(videoTime: number): void {
+    if (this.metronome.isRunning()) {
+      console.log('[LoopController] resyncMetronomeIfRunning 호출:', { videoTime });
+      this.metronome.resync(videoTime);
+    }
   }
 
   /**

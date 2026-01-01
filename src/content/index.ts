@@ -1019,8 +1019,23 @@ export class YouTubeLoopPractice {
       //   await this.executeCountIn(segmentId);
       // } else {
       // 카운트인 없이 바로 시작
-      this.video.currentTime = segment.start;
+      // 중요: 먼저 루프를 활성화하여 메트로놈 범위를 새 루프로 설정한 후
+      // video.currentTime을 변경해야 함. 그렇지 않으면 메트로놈이 이전 루프 범위를
+      // 기준으로 점프를 감지하여 이전 루프 시작점으로 되돌아갈 수 있음.
+      const prevVideoTime = this.video.currentTime;
       this.activateSegment(segmentId);
+      this.video.currentTime = segment.start;
+      console.log('jumpAndActivateSegment: video.currentTime 변경:', {
+        before: prevVideoTime,
+        targetStart: segment.start,
+        after: this.video.currentTime
+      });
+
+      // 메트로놈이 실행 중이면 새 위치에서 resync (더블비트 방지)
+      // setProfile()에서는 video.currentTime이 아직 변경 전이므로 여기서 호출
+      if (this.loopController) {
+        this.loopController.resyncMetronomeIfRunning(segment.start);
+      }
 
       // 영상이 정지 상태면 재생 시작
       if (this.video.paused) {
@@ -1199,6 +1214,7 @@ export class YouTubeLoopPractice {
     const effectiveSync = this.getEffectiveSync(segment);
 
     // BPM이 설정되지 않으면 양자화 불가
+    // (UI에서 Beat Sync가 완료되지 않으면 Quantize 메뉴가 표시되지 않으므로 여기 도달하지 않음)
     if (!effectiveSync.tempo) {
       console.warn('양자화 실패: BPM이 설정되지 않음');
       return;
