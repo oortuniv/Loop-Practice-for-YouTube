@@ -6,6 +6,26 @@
 
 ## [Unreleased]
 
+### 2026-01-02 (Session 03 - Loop Switch Fix)
+
+#### Fixed
+- 🐛 **메트로놈 ON 상태에서 루프 전환 버그 수정**
+  - 타 루프 클릭 시 이전 루프로 점프하는 문제 해결
+  - `setProfile()`에서 `setLoopRange()` 즉시 호출
+  - 파일: `src/content/loops.ts`
+
+- 🐛 **루프 전환 후 메트로놈 무음 문제 해결**
+  - `resync()` 호출 타이밍을 video.currentTime 변경 후로 수정
+  - `resyncMetronomeIfRunning()` 메서드 추가
+  - 파일: `src/content/loops.ts`, `src/content/index.ts`
+
+#### Changed
+- 🔄 **Quantize 메뉴 조건부 표시**
+  - Beat Sync 완료 시에만 Quantize 메뉴 표시
+  - 조건: BPM + 박자표 + TAP Sync 오프셋 모두 설정 필요
+  - `isBeatSyncComplete()` 헬퍼 메서드 추가
+  - 파일: `src/content/ui-controller.ts`
+
 ### 2026-01-02 (Session 02 - Double Beat Fix)
 
 #### Fixed
