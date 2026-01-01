@@ -23,11 +23,11 @@ docs/development/
 3. `ARCHITECTURE.md`에서 전체 구조 파악
 
 ### 세션 종료 시
-1. 현재 작업 내용을 세션 문서에 기록
+1. 현재 작업 내용을 `sessions/YYYY-MM-DD/` 세션 문서에 기록
 2. 주요 변경사항은 `CHANGELOG.md`에 업데이트
 3. 아키텍처 변경이 있다면 `ARCHITECTURE.md` 업데이트
 
-## 🔍 빠른 참조
+## 🔍 빠른 참조 
 
 - **최근 변경사항**: [CHANGELOG.md](./CHANGELOG.md)
 - **시스템 구조**: [ARCHITECTURE.md](./ARCHITECTURE.md)
