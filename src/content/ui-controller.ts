@@ -12,6 +12,7 @@ export class UIController {
   private collapsedSegments: Map<string, boolean> = new Map(); // 세그먼트별 접힌 상태 저장
   private draggedSegmentId: string | null = null; // 드래그 중인 세그먼트 ID
   private globalSyncMetronomeEnabled: boolean = false; // 글로벌 싱크 메트로놈 상태
+  private lastClickTime: Map<string, number> = new Map(); // 더블클릭 감지용 마지막 클릭 시간
 
   constructor() {
     this.ui = new YouTubeUI();
@@ -196,9 +197,9 @@ export class UIController {
    * BPM/박자표 설정 여부에 따라 bar 옵션을 표시하거나 숨깁니다.
    */
   private getDurationOptions(): string {
-    const hasBpmOrTimeSignature = this.profile?.tempo || this.profile?.timeSignature;
+    const hasTempoSettings = this.profile?.tempo && this.profile?.timeSignature;
 
-    if (!hasBpmOrTimeSignature) {
+    if (!hasTempoSettings) {
       // BPM/박자표 미설정: 초 단위만 표시
       return `
         <option value="5">5 seconds</option>
@@ -206,7 +207,7 @@ export class UIController {
         <option value="20">20 seconds</option>
         <option value="30">30 seconds</option>
         <option value="60">60 seconds</option>
-        <option disabled>─ Set BPM for bar mode ─</option>
+        <option disabled>─ Set tempo for bar mode ─</option>
       `;
     }
 
@@ -276,7 +277,7 @@ export class UIController {
             <div class="global-settings">
               <div class="settings-row">
                 <div class="setting-group">
-                  <label>Tempo (BPM):</label>
+                  <label>Tempo (BPM)ㄴ</label>
                   <div class="tempo-controls">
                     <input type="text" id="tempoInput" class="tempo-input" value="${tempo || '---'}" data-placeholder="---">
                     <button class="btn btn-small btn-tap" id="tapTempo">TAP</button>
@@ -284,7 +285,7 @@ export class UIController {
                 </div>
 
                 <div class="setting-group">
-                  <label>Time Signature:</label>
+                  <label>Time Signature</label>
                   <select id="timeSignature" class="time-signature-select">
                     <option value="" ${!timeSignature ? 'selected' : ''}>---</option>
                     <option value="2/4" ${timeSignature === '2/4' ? 'selected' : ''}>2/4</option>
@@ -339,22 +340,31 @@ export class UIController {
           <!-- Loop Management Card -->
           <div class="controls-section">
             <div class="control-group">
-              <label>Loop Management:</label>
+              <label>Loop Management</label>
               <div class="segment-management">
-                <input
-                  type="text"
-                  id="segmentLabel"
-                  class="segment-input label-input"
-                  list="labelPresets"
-                  placeholder="Loop name..."
-                />
-                <datalist id="labelPresets">
-                  <option value="Intro">
-                  <option value="Verse">
-                  <option value="Chorus">
-                  <option value="Bridge">
-                  <option value="Outro">
-                </datalist>
+                <div class="label-input-wrapper">
+                  <input
+                    type="text"
+                    id="segmentLabel"
+                    class="segment-input label-input"
+                    placeholder="Loop name..."
+                    autocomplete="off"
+                  />
+                  <button type="button" class="label-dropdown-toggle" id="labelDropdownToggle">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                      <path d="M7 10l5 5 5-5z"/>
+                    </svg>
+                  </button>
+                  <div class="label-dropdown" id="labelDropdown" style="display: none;">
+                    <div class="label-option" data-value="Intro">Intro</div>
+                    <div class="label-option" data-value="Verse">Verse</div>
+                    <div class="label-option" data-value="Pre Chorus">Pre Chorus</div>
+                    <div class="label-option" data-value="Chorus">Chorus</div>
+                    <div class="label-option" data-value="Interlude">Interlude</div>
+                    <div class="label-option" data-value="Bridge">Bridge</div>
+                    <div class="label-option" data-value="Outro">Outro</div>
+                  </div>
+                </div>
                 <select id="loopDuration" class="segment-input duration-select">
                   ${this.getDurationOptions()}
                 </select>
@@ -401,7 +411,10 @@ export class UIController {
             </button>
           </div>
           ${isCollapsed ? `
-          <div class="segment-time-range">${this.formatTime(safeStart)} ~ ${this.formatTime(safeEnd)}</div>
+          <div class="segment-time-range">
+            <span>${this.formatTime(safeStart)}</span>
+            <span>~ ${this.formatTime(safeEnd)}</span>
+          </div>
           <button class="btn btn-loop-compact ${isActive ? 'active' : ''}" data-segment-id="${segment.id}" data-action="jump-and-activate" title="Activate loop">
             <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
               <path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/>
@@ -415,6 +428,7 @@ export class UIController {
               </svg>
             </button>
             <div class="menu-dropdown" data-segment-id="${segment.id}" style="display: none;">
+              <button class="menu-item" data-segment-id="${segment.id}" data-action="duplicate">Duplicate</button>
               <button class="menu-item menu-delete" data-segment-id="${segment.id}" data-action="delete">Delete</button>
             </div>
           </div>
@@ -424,7 +438,7 @@ export class UIController {
             <div class="time-input-group">
               <label>Start:</label>
               <input type="text" class="time-input" data-segment-id="${segment.id}" data-time-type="start"
-                     value="${this.formatTime(safeStart)}" placeholder="0:00.000">
+                     value="${this.formatTime(safeStart)}" placeholder="00:00.000">
               <button class="time-set-btn" data-segment-id="${segment.id}" data-action="set-start-time" title="Set to current time">
                 <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor">
                   <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/>
@@ -434,7 +448,7 @@ export class UIController {
             <div class="time-input-group">
               <label>End:</label>
               <input type="text" class="time-input" data-segment-id="${segment.id}" data-time-type="end"
-                     value="${this.formatTime(safeEnd)}" placeholder="0:00.000">
+                     value="${this.formatTime(safeEnd)}" placeholder="00:00.000">
               ${this.getBarInputHTML(segment.id, safeStart, safeEnd)}
               <button class="time-set-btn" data-segment-id="${segment.id}" data-action="set-end-time" title="Set to current time">
                 <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor">
@@ -477,7 +491,35 @@ export class UIController {
             </div>
           </div>
         </div>
+        ${this.getAdd8BarsButtonHTML(segment.id, isCollapsed)}
       </div>
+    `;
+  }
+
+  /**
+   * Add 8 bars 버튼 HTML을 생성합니다.
+   * 카드가 접혀있는 경우 버튼을 숨기고, BPM/박자표가 설정되지 않은 경우 안내 메시지를 표시합니다.
+   */
+  private getAdd8BarsButtonHTML(segmentId: string, isCollapsed: boolean): string {
+    if (isCollapsed) {
+      return '';
+    }
+
+    if (!this.profile?.tempo || !this.profile?.timeSignature) {
+      return `
+        <div class="btn-add-8-bars disabled" title="Set BPM and time signature to enable bar mode">
+          <span>Set tempo for bar mode</span>
+        </div>
+      `;
+    }
+
+    return `
+      <button class="btn-add-8-bars" data-segment-id="${segmentId}" data-action="add-8-bars" title="Add 8 bars after this loop">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+          <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/>
+        </svg>
+        <span>Add 8 bars</span>
+      </button>
     `;
   }
 
@@ -939,11 +981,16 @@ export class UIController {
       }
 
       .segment-time-range {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
         font-size: 11px;
         color: ${textSecondary};
         font-family: 'Courier New', monospace;
         white-space: nowrap;
         margin-right: 8px;
+        line-height: 1.3;
+        flex-shrink: 0;
       }
 
       .btn-loop-compact {
@@ -1028,23 +1075,86 @@ export class UIController {
         display: block;
       }
 
+      .label-input-wrapper {
+        position: relative;
+        display: flex;
+        flex: 1;
+        min-width: 0;
+      }
+
       .label-input {
         flex: 1;
-        padding: 4px 8px;
+        padding: 4px 28px 4px 8px;
         border: 1px solid ${inputBorder};
         border-radius: 2px;
         font-size: 11px;
         background: ${inputBg};
         color: ${textPrimary};
-        cursor: pointer;
+        cursor: text;
         appearance: none;
         -webkit-appearance: none;
         -moz-appearance: none;
+        min-width: 0;
       }
 
       .label-input:focus {
         outline: none;
         border-color: #065fd4;
+      }
+
+      .label-dropdown-toggle {
+        position: absolute;
+        right: 1px;
+        top: 1px;
+        bottom: 1px;
+        width: 24px;
+        background: transparent;
+        border: none;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: ${textSecondary};
+        padding: 0;
+      }
+
+      .label-dropdown-toggle:hover {
+        color: ${textPrimary};
+      }
+
+      .label-dropdown {
+        position: absolute;
+        top: 100%;
+        left: 0;
+        right: 0;
+        background: ${bgPrimary};
+        border: 1px solid ${borderColor};
+        border-radius: 4px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        z-index: 1000;
+        margin-top: 2px;
+        max-height: 200px;
+        overflow-y: auto;
+      }
+
+      .label-option {
+        padding: 8px 12px;
+        font-size: 13px;
+        color: ${textPrimary};
+        cursor: pointer;
+        transition: background 0.1s;
+      }
+
+      .label-option:hover {
+        background: ${hoverBg};
+      }
+
+      .label-option:first-child {
+        border-radius: 4px 4px 0 0;
+      }
+
+      .label-option:last-child {
+        border-radius: 0 0 4px 4px;
       }
 
       .time-input-group {
@@ -1339,6 +1449,39 @@ export class UIController {
       .segments-list::-webkit-scrollbar-thumb:hover {
         background: ${this.isDarkTheme ? '#4f4f4f' : '#aaa'};
       }
+
+      /* Add 8 bars 버튼 */
+      .btn-add-8-bars {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 4px;
+        width: 100%;
+        padding: 4px 8px;
+        margin-top: 6px;
+        background: transparent;
+        border: none;
+        border-top: 1px dashed ${borderColor};
+        border-radius: 0;
+        color: ${textSecondary};
+        font-size: 11px;
+        cursor: pointer;
+        transition: all 0.2s;
+      }
+
+      .btn-add-8-bars:hover:not(.disabled) {
+        color: #065fd4;
+      }
+
+      .btn-add-8-bars.disabled {
+        cursor: default;
+        opacity: 0.6;
+        font-style: italic;
+      }
+
+      .btn-add-8-bars svg {
+        flex-shrink: 0;
+      }
     `;
   }
 
@@ -1381,6 +1524,39 @@ export class UIController {
     if (segmentLabelInput) {
       this.preventYouTubeShortcuts(segmentLabelInput);
     }
+
+    // 라벨 드롭다운 토글 버튼
+    const labelDropdownToggle = this.ui.querySelector('#labelDropdownToggle');
+    if (labelDropdownToggle) {
+      labelDropdownToggle.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.toggleLabelDropdown();
+      });
+    }
+
+    // 라벨 드롭다운 옵션 클릭
+    const labelDropdown = this.ui.querySelector('#labelDropdown');
+    if (labelDropdown) {
+      labelDropdown.addEventListener('click', (e) => {
+        const target = e.target as HTMLElement;
+        if (target.classList.contains('label-option')) {
+          const value = target.getAttribute('data-value');
+          if (value && segmentLabelInput) {
+            segmentLabelInput.value = value;
+            segmentLabelInput.focus();
+          }
+          this.closeLabelDropdown();
+        }
+      });
+    }
+
+    // 외부 클릭 시 드롭다운 닫기
+    document.addEventListener('click', (e) => {
+      const labelWrapper = this.ui.querySelector('.label-input-wrapper');
+      if (labelWrapper && !labelWrapper.contains(e.target as Node)) {
+        this.closeLabelDropdown();
+      }
+    });
 
     // Tempo 입력
     const tempoInput = this.ui.querySelector<HTMLInputElement>('#tempoInput');
@@ -1534,13 +1710,13 @@ export class UIController {
       targetElement: target
     });
 
-    // SVG 아이콘 클릭 시 부모 버튼 찾기
+    // 버튼 내부 요소(SVG, SPAN 등) 클릭 시 부모 버튼 찾기
     let buttonElement = target;
-    if (target.tagName === 'svg' || target.tagName === 'path') {
+    if (target.tagName !== 'BUTTON' && target.tagName !== 'INPUT') {
       const closestButton = target.closest('button');
       if (closestButton) {
         buttonElement = closestButton as HTMLElement;
-        console.log('SVG 클릭 감지, 부모 버튼 찾음:', buttonElement);
+        console.log('버튼 내부 요소 클릭 감지, 부모 버튼 찾음:', buttonElement);
       }
     }
 
@@ -1574,6 +1750,11 @@ export class UIController {
         this.closeAllMenus();
         this.onCommand?.('delete-segment', { segmentId });
         break;
+      case 'duplicate':
+        console.log('duplicate 액션 실행');
+        this.closeAllMenus();
+        this.onCommand?.('duplicate-segment', { segmentId });
+        break;
       case 'toggle-menu':
         console.log('toggle-menu 액션 실행');
         this.toggleMenu(segmentId);
@@ -1605,6 +1786,10 @@ export class UIController {
       case 'toggle-collapse':
         console.log('toggle-collapse 액션 실행');
         this.handleToggleCollapse(segmentId);
+        break;
+      case 'add-8-bars':
+        console.log('add-8-bars 액션 실행');
+        this.onCommand?.('add-8-bars', { segmentId });
         break;
       default:
         console.warn('알 수 없는 액션:', action);
@@ -1776,6 +1961,7 @@ export class UIController {
 
   /**
    * 시간 입력 필드에서 마우스 다운 이벤트 처리 (드래그 시작)
+   * 더블클릭 시 키보드 입력 모드로 전환
    */
   private handleTimeInputMouseDown(e: MouseEvent) {
     const target = e.target as HTMLInputElement;
@@ -1789,12 +1975,25 @@ export class UIController {
       return;
     }
 
-    e.preventDefault();
-
     const segmentId = target.getAttribute('data-segment-id');
     const timeType = target.getAttribute('data-time-type') as 'start' | 'end';
 
     if (!segmentId || !timeType) return;
+
+    // 더블클릭 감지
+    const clickKey = `time-${segmentId}-${timeType}`;
+    const now = Date.now();
+    const lastClick = this.lastClickTime.get(clickKey) || 0;
+    this.lastClickTime.set(clickKey, now);
+
+    if (now - lastClick < 300) {
+      // 더블클릭: 키보드 입력 모드로 전환
+      e.preventDefault();
+      this.enableTimeKeyboardInput(target, segmentId, timeType);
+      return;
+    }
+
+    e.preventDefault();
 
     const segment = this.profile?.segments.find(s => s.id === segmentId);
     if (!segment) return;
@@ -1841,6 +2040,52 @@ export class UIController {
   }
 
   /**
+   * Time 입력 필드를 키보드 입력 모드로 전환
+   */
+  private enableTimeKeyboardInput(input: HTMLInputElement, segmentId: string, timeType: 'start' | 'end') {
+    const segment = this.profile?.segments.find(s => s.id === segmentId);
+    const originalValue = segment ? (timeType === 'start' ? segment.start : segment.end) : 0;
+
+    // 포커스 및 선택
+    input.style.cursor = 'text';
+    input.focus();
+    input.select();
+
+    const restoreState = () => {
+      input.style.cursor = 'ns-resize';
+    };
+
+    const handleBlur = () => {
+      restoreState();
+      input.removeEventListener('blur', handleBlur);
+      input.removeEventListener('keydown', handleKeydown);
+
+      // 값 파싱 및 저장
+      const parsedValue = this.parseTimeInput(input.value);
+      if (parsedValue !== null) {
+        this.onCommand?.('update-time', { segmentId, timeType, time: parsedValue });
+      } else {
+        // 잘못된 값이면 원래 값으로 복원
+        input.value = this.formatTime(originalValue);
+      }
+    };
+
+    const handleKeydown = (e: KeyboardEvent) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        input.blur();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        input.value = this.formatTime(originalValue);
+        input.blur();
+      }
+    };
+
+    input.addEventListener('blur', handleBlur);
+    input.addEventListener('keydown', handleKeydown);
+  }
+
+  /**
    * Bar 선택 박스 변경 이벤트 처리
    * 선택된 bar 수를 duration으로 변환하여 End 시간을 변경합니다.
    */
@@ -1869,6 +2114,7 @@ export class UIController {
 
   /**
    * 속도 입력 필드에서 마우스 다운 이벤트 처리 (드래그 시작)
+   * 더블클릭 시 키보드 입력 모드로 전환
    */
   private handleRateInputMouseDown(e: MouseEvent) {
     const target = e.target as HTMLInputElement;
@@ -1882,11 +2128,23 @@ export class UIController {
       return;
     }
 
-    e.preventDefault();
-
     const segmentId = target.getAttribute('data-segment-id');
-
     if (!segmentId) return;
+
+    // 더블클릭 감지
+    const clickKey = `rate-${segmentId}`;
+    const now = Date.now();
+    const lastClick = this.lastClickTime.get(clickKey) || 0;
+    this.lastClickTime.set(clickKey, now);
+
+    if (now - lastClick < 300) {
+      // 더블클릭: 키보드 입력 모드로 전환
+      e.preventDefault();
+      this.enableRateKeyboardInput(target, segmentId);
+      return;
+    }
+
+    e.preventDefault();
 
     const segment = this.profile?.segments.find(s => s.id === segmentId);
     if (!segment) return;
@@ -1929,6 +2187,56 @@ export class UIController {
   }
 
   /**
+   * Rate 입력 필드를 키보드 입력 모드로 전환
+   */
+  private enableRateKeyboardInput(input: HTMLInputElement, segmentId: string) {
+    const segment = this.profile?.segments.find(s => s.id === segmentId);
+    const originalRate = segment?.rate || 1.0;
+    const originalValue = Math.round(originalRate * 100);
+
+    // readonly 속성 제거 및 포커스
+    input.removeAttribute('readonly');
+    input.style.cursor = 'text';
+    input.focus();
+    input.select();
+
+    const restoreState = () => {
+      input.setAttribute('readonly', '');
+      input.style.cursor = 'ns-resize';
+    };
+
+    const handleBlur = () => {
+      restoreState();
+      input.removeEventListener('blur', handleBlur);
+      input.removeEventListener('keydown', handleKeydown);
+
+      // 값 파싱 및 저장
+      const parsedValue = parseInt(input.value, 10);
+      if (!isNaN(parsedValue) && parsedValue >= 5 && parsedValue <= 160) {
+        const newRate = parsedValue / 100;
+        this.onCommand?.('update-rate', { segmentId, rate: newRate });
+      } else {
+        // 잘못된 값이면 원래 값으로 복원
+        input.value = originalValue.toString();
+      }
+    };
+
+    const handleKeydown = (e: KeyboardEvent) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        input.blur();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        input.value = originalValue.toString();
+        input.blur();
+      }
+    };
+
+    input.addEventListener('blur', handleBlur);
+    input.addEventListener('keydown', handleKeydown);
+  }
+
+  /**
    * 시간 형식을 파싱합니다. (ms 단위 지원)
    */
   private parseTimeInput(timeString: string): number | null {
@@ -1960,17 +2268,17 @@ export class UIController {
   }
 
   /**
-   * 시간을 포맷합니다. (ms 단위까지 표시)
+   * 시간을 포맷합니다. (mm:ss.xxx 형식)
    */
   private formatTime(seconds: number): string {
     if (typeof seconds !== 'number' || isNaN(seconds)) {
-      return '0:00.000';
+      return '00:00.000';
     }
 
     const mins = Math.floor(seconds / 60);
     const secs = Math.floor(seconds % 60);
     const ms = Math.floor((seconds % 1) * 1000);
-    return `${mins}:${secs.toString().padStart(2, '0')}.${ms.toString().padStart(3, '0')}`;
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}.${ms.toString().padStart(3, '0')}`;
   }
 
   /**
@@ -2002,12 +2310,25 @@ export class UIController {
 
   /**
    * Tempo 입력 필드에서 마우스 다운 이벤트 처리 (드래그 시작)
+   * 더블클릭 시 키보드 입력 모드로 전환
    */
   private handleTempoInputMouseDown(e: MouseEvent) {
     const target = e.target as HTMLInputElement;
 
-    // 포커스 상태면 드래그 안 함
+    // 포커스 상태면 드래그 안 함 (이미 편집 모드)
     if (document.activeElement === target) {
+      return;
+    }
+
+    // 더블클릭 감지
+    const now = Date.now();
+    const lastClick = this.lastClickTime.get('tempo') || 0;
+    this.lastClickTime.set('tempo', now);
+
+    if (now - lastClick < 300) {
+      // 더블클릭: 키보드 입력 모드로 전환
+      e.preventDefault();
+      this.enableTempoKeyboardInput(target);
       return;
     }
 
@@ -2044,6 +2365,55 @@ export class UIController {
 
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
+  }
+
+  /**
+   * Tempo 입력 필드를 키보드 입력 모드로 전환
+   */
+  private enableTempoKeyboardInput(input: HTMLInputElement) {
+    const currentValue = input.value.trim();
+
+    // "---"인 경우 빈 값으로 시작
+    if (currentValue === '---') {
+      input.value = '';
+    }
+
+    // readonly 속성 제거 및 포커스
+    input.readOnly = false;
+    input.style.cursor = 'text';
+    input.focus();
+    input.select();
+
+    const restoreState = () => {
+      input.readOnly = false;
+      input.style.cursor = 'ns-resize';
+
+      // 값이 비어있으면 "---"로 복원
+      if (input.value.trim() === '') {
+        input.value = '---';
+      }
+    };
+
+    const handleBlur = () => {
+      restoreState();
+      input.removeEventListener('blur', handleBlur);
+      input.removeEventListener('keydown', handleKeydown);
+    };
+
+    const handleKeydown = (e: KeyboardEvent) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        input.blur();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        // 원래 값으로 복원
+        input.value = this.profile?.tempo?.toString() || '---';
+        input.blur();
+      }
+    };
+
+    input.addEventListener('blur', handleBlur);
+    input.addEventListener('keydown', handleKeydown);
   }
 
   /**
@@ -2383,6 +2753,53 @@ export class UIController {
     // UI 업데이트
     this.render();
     this.setupEventListeners();
+  }
+
+  /**
+   * 라벨 드롭다운 토글
+   */
+  private toggleLabelDropdown() {
+    const dropdown = this.ui.querySelector('#labelDropdown') as HTMLElement;
+    if (dropdown) {
+      const isVisible = dropdown.style.display !== 'none';
+      dropdown.style.display = isVisible ? 'none' : 'block';
+    }
+  }
+
+  /**
+   * 라벨 드롭다운 닫기
+   */
+  private closeLabelDropdown() {
+    const dropdown = this.ui.querySelector('#labelDropdown') as HTMLElement;
+    if (dropdown) {
+      dropdown.style.display = 'none';
+    }
+  }
+
+  /**
+   * 특정 세그먼트로 스크롤합니다.
+   * 페이지 전체 스크롤은 영향받지 않고, 컴포넌트 내부 스크롤만 조정합니다.
+   */
+  scrollToSegment(segmentId: string) {
+    const segmentsList = this.ui.querySelector('.segments-list') as HTMLElement;
+    const targetCard = this.ui.querySelector(`[data-segment-id="${segmentId}"]`) as HTMLElement;
+
+    if (segmentsList && targetCard) {
+      // 컴포넌트 내부 스크롤만 조정 (scrollIntoView 대신 직접 계산)
+      const listTop = segmentsList.scrollTop;
+      const listHeight = segmentsList.clientHeight;
+      const cardTop = targetCard.offsetTop - segmentsList.offsetTop;
+      const cardHeight = targetCard.offsetHeight;
+
+      // 카드가 보이는 영역 밖에 있는 경우에만 스크롤
+      if (cardTop < listTop) {
+        // 카드가 위쪽으로 벗어난 경우
+        segmentsList.scrollTop = cardTop;
+      } else if (cardTop + cardHeight > listTop + listHeight) {
+        // 카드가 아래쪽으로 벗어난 경우
+        segmentsList.scrollTop = cardTop + cardHeight - listHeight;
+      }
+    }
   }
 
   /**

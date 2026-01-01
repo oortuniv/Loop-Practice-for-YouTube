@@ -117,7 +117,13 @@ export class LoopController {
       return;
     }
 
-    const { start, end } = this.active;
+    // 최신 segment 정보를 profile에서 가져옴 (실시간 업데이트 반영)
+    const latestSegment = this.profile.segments.find(s => s.id === this.active!.id);
+    if (!latestSegment) {
+      return;
+    }
+
+    const { start, end } = latestSegment;
 
     // start와 end 값이 유효하지 않은 경우 처리
     if (start === undefined || start === null || isNaN(start) || typeof start !== 'number' ||
@@ -141,13 +147,13 @@ export class LoopController {
     }
 
     // 메트로놈이 활성화되어 있고 재생 중이면 메트로놈 시작
-    if (this.active.metronomeEnabled && !this.video.paused && !this.metronome.isRunning()) {
+    if (latestSegment.metronomeEnabled && !this.video.paused && !this.metronome.isRunning()) {
       this.startMetronome();
     }
 
     // 디버깅: 루프 상태 로그 (실제 환경에서는 제거)
     if (process.env.NODE_ENV === 'development') {
-      console.log(`루프 체크: 현재시간=${currentTime.toFixed(2)}s, 구간=${start}s~${end}s, 활성=${this.active.label}`);
+      console.log(`루프 체크: 현재시간=${currentTime.toFixed(2)}s, 구간=${start}s~${end}s, 활성=${latestSegment.label}`);
     }
 
     // end 지점에 도달하면 start로 점프 (더 정확한 조건)
@@ -157,7 +163,7 @@ export class LoopController {
 
       // 메트로놈 재동기화 (루프 점프 시)
       // start 지점부터 beat 0으로 재시작
-      if (this.active.metronomeEnabled && this.metronome.isRunning()) {
+      if (latestSegment.metronomeEnabled && this.metronome.isRunning()) {
         this.stopMetronome();
         this.startMetronome();
       }
@@ -249,7 +255,7 @@ export class LoopController {
         const startSec = Math.floor(currentTime % 60);
         const endMin = Math.floor(endTime / 60);
         const endSec = Math.floor(endTime % 60);
-        segmentLabel = `${startMin}:${startSec.toString().padStart(2, '0')}~${endMin}:${endSec.toString().padStart(2, '0')}`;
+        segmentLabel = `${startMin.toString().padStart(2, '0')}:${startSec.toString().padStart(2, '0')}~${endMin.toString().padStart(2, '0')}:${endSec.toString().padStart(2, '0')}`;
       }
       
       const segment: LoopSegment = {
@@ -275,7 +281,7 @@ export class LoopController {
           const startSec = Math.floor(lastSegment.start % 60);
           const endMin = Math.floor(currentTime / 60);
           const endSec = Math.floor(currentTime % 60);
-          lastSegment.label = `${startMin}:${startSec.toString().padStart(2, '0')}~${endMin}:${endSec.toString().padStart(2, '0')}`;
+          lastSegment.label = `${startMin.toString().padStart(2, '0')}:${startSec.toString().padStart(2, '0')}~${endMin.toString().padStart(2, '0')}:${endSec.toString().padStart(2, '0')}`;
         }
         
         return lastSegment;

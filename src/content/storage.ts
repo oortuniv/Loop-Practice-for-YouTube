@@ -3,9 +3,12 @@ import { VideoProfile, StorageKey } from '../types';
 export async function loadProfile(videoId: string): Promise<VideoProfile> {
   const key: StorageKey = `vid:${videoId}`;
   const data = await chrome.storage.sync.get(key);
-  
+
   if (data[key]) {
-    return data[key] as VideoProfile;
+    const profile = data[key] as VideoProfile;
+    // 페이지 로드 시 활성 루프 초기화 (새로고침/페이지 이동 시 루프 비활성화)
+    profile.activeSegmentId = null;
+    return profile;
   }
   
   // 새로운 프로필 생성

@@ -15,6 +15,7 @@ export class YouTubeLoopPractice {
   private uiController?: UIController;
   public isInitialized = false;
   private saveProfileThrottled: () => void;
+  private navigationListenerRegistered = false;
 
   constructor() {
     this.saveProfileThrottled = throttle(() => this.saveProfile(), 1000);
@@ -25,11 +26,6 @@ export class YouTubeLoopPractice {
   }
 
   async init() {
-    if (this.isInitialized) {
-      console.log('이미 초기화됨, 초기화 건너뜀');
-      return;
-    }
-
     try {
       console.log('YouTubeLoopPractice 초기화 시작');
 
@@ -56,12 +52,34 @@ export class YouTubeLoopPractice {
         console.log('비디오 ID를 추출할 수 없음');
         return;
       }
+
+      // 이미 같은 영상에 대해 초기화되어 있으면 건너뜀
+      if (this.isInitialized && this.videoId === videoId) {
+        console.log('이미 동일 영상에 대해 초기화됨, 초기화 건너뜀');
+        return;
+      }
+
+      // 다른 영상으로 전환된 경우 기존 상태 정리
+      if (this.isInitialized && this.videoId !== videoId) {
+        console.log('다른 영상으로 전환 감지, 기존 상태 정리');
+        this.cleanup();
+
+        // cleanup 후 비디오 요소 다시 가져오기
+        this.video = await waitForVideoElement();
+        if (!this.video) {
+          console.log('cleanup 후 비디오 요소를 찾을 수 없음');
+          return;
+        }
+      }
+
       this.videoId = videoId;
       console.log('비디오 ID:', videoId);
 
       // 프로필 로드
       this.profile = await loadProfile(this.videoId);
-      console.log('프로필 로드 완료:', this.profile);
+      // 페이지 로드/새로고침 시 활성 루프 초기화
+      this.profile.activeSegmentId = null;
+      console.log('프로필 로드 완료 (활성 루프 초기화됨):', this.profile);
 
       // 영상 제목과 채널 이름 가져오기
       await this.fetchVideoMetadata();
@@ -79,21 +97,17 @@ export class YouTubeLoopPractice {
       this.setupEventListeners();
       console.log('이벤트 리스너 설정 완료');
 
-      // YouTube 네비게이션 감지
-      onYouTubeNavigation(() => {
-        console.log('YouTube 네비게이션 감지, 정리 후 재초기화');
-        this.cleanup();
-        setTimeout(() => this.init(), 1000);
-      });
+      // YouTube 네비게이션 감지 (한 번만 등록)
+      if (!this.navigationListenerRegistered) {
+        this.navigationListenerRegistered = true;
+        onYouTubeNavigation(() => {
+          console.log('YouTube 네비게이션 감지, 재초기화 시도');
+          setTimeout(() => this.init(), 500);
+        });
+      }
 
       this.isInitialized = true;
       console.log('Loop Practice for YouTube 초기화 완료');
-
-      // 초기화 완료 후 활성 구간이 있으면 즉시 적용
-      if (this.profile.activeSegmentId) {
-        console.log('활성 구간 복원:', this.profile.activeSegmentId);
-        this.loopController.setActive(this.profile.activeSegmentId);
-      }
 
     } catch (error) {
       console.error('초기화 실패:', error);
@@ -204,6 +218,10 @@ export class YouTubeLoopPractice {
           this.deleteSegment(data?.segmentId);
           this.refreshUI();
           break;
+        case 'duplicate-segment':
+          this.duplicateSegment(data?.segmentId);
+          this.refreshUI();
+          break;
         case 'update-label':
           this.updateSegment(data?.segmentId, { label: data?.label });
           this.refreshUI();
@@ -217,14 +235,20 @@ export class YouTubeLoopPractice {
           this.refreshUI();
           break;
         case 'update-time':
+          console.log('[update-time] 호출됨:', { timeType: data?.timeType, time: data?.time, segmentId: data?.segmentId });
+
           const timeUpdate = data?.timeType === 'start'
             ? { start: data?.time }
             : { end: data?.time };
           this.updateSegment(data?.segmentId, timeUpdate);
 
-          // 드래그 중 실시간 피드백: 영상 위치를 변경된 시간으로 이동
-          if (this.video && typeof data?.time === 'number' && !isNaN(data.time)) {
+          // 드래그 중 실시간 피드백: Start time 변경 시에만 영상 위치를 이동
+          // End time 변경 시에는 현재 재생 위치를 유지
+          if (data?.timeType === 'start' && this.video && typeof data?.time === 'number' && !isNaN(data.time)) {
+            console.log('[update-time] Start time 변경 → 재생 위치 이동:', data.time);
             this.video.currentTime = data.time;
+          } else {
+            console.log('[update-time] End time 변경 → 재생 위치 유지');
           }
 
           this.refreshUI();
@@ -304,6 +328,10 @@ export class YouTubeLoopPractice {
             // 기존 방식: draggedId와 targetId로 재정렬
             this.reorderSegments(data?.draggedId, data?.targetId);
           }
+          this.refreshUI();
+          break;
+        case 'add-8-bars':
+          this.add8BarsAfterSegment(data?.segmentId);
           this.refreshUI();
           break;
         default:
@@ -712,14 +740,14 @@ export class YouTubeLoopPractice {
       ? this.profile.defaultRate
       : 1.0;
 
-    // 라벨이 비어있으면 시작 시간 ~ 끝 시간을 기준으로 자동 지정
+    // 라벨이 비어있으면 시작 시간 ~ 끝 시간을 기준으로 자동 지정 (mm:ss 형식)
     let finalLabel = label;
     if (!finalLabel) {
       const startMins = Math.floor(finalStartTime / 60);
       const startSecs = Math.floor(finalStartTime % 60);
       const endMins = Math.floor(finalEndTime / 60);
       const endSecs = Math.floor(finalEndTime % 60);
-      finalLabel = `${startMins}:${startSecs.toString().padStart(2, '0')}~${endMins}:${endSecs.toString().padStart(2, '0')}`;
+      finalLabel = `${startMins.toString().padStart(2, '0')}:${startSecs.toString().padStart(2, '0')}~${endMins.toString().padStart(2, '0')}:${endSecs.toString().padStart(2, '0')}`;
     }
 
     const newSegment: LoopSegment = {
@@ -734,6 +762,10 @@ export class YouTubeLoopPractice {
       profile.segments = [...profile.segments, newSegment];
     });
     console.log(`구간 생성: ${finalLabel} (${finalStartTime}s ~ ${finalEndTime}s)`);
+
+    // 생성된 카드로 스크롤
+    this.scrollToSegment(newSegment.id);
+
     return newSegment; // 생성된 구간을 반환
   }
 
@@ -832,15 +864,36 @@ export class YouTubeLoopPractice {
     console.log('jumpAndActivateSegment: 찾은 구간:', segment);
     console.log('jumpAndActivateSegment: 현재 activeSegmentId:', this.profile.activeSegmentId);
 
-    // 이미 활성화된 구간을 클릭하면 비활성화 (토글)
+    // 이미 활성화된 구간을 클릭한 경우
     if (segmentId === this.profile.activeSegmentId) {
-      console.log('jumpAndActivateSegment: 이미 활성화된 구간이므로 비활성화');
-      this.activateSegment(segmentId); // 비활성화
+      // 영상이 재생 중이면 비활성화 (토글)
+      if (!this.video.paused) {
+        console.log('jumpAndActivateSegment: 이미 활성화된 구간이므로 비활성화');
+        this.activateSegment(segmentId); // 비활성화
+      } else {
+        // 영상이 정지 중이면 시작 지점으로 이동 후 재생
+        console.log('jumpAndActivateSegment: 이미 활성화된 구간, 시작 지점으로 이동 후 재생');
+        this.video.currentTime = segment.start;
+        this.video.play().catch((error) => {
+          console.error('jumpAndActivateSegment: 재생 실패:', error);
+        });
+      }
     } else {
       // 다른 구간을 활성화: 시작 지점으로 이동
       console.log('jumpAndActivateSegment: 구간 활성화 및 시작 지점으로 이동:', segment.start);
+      console.log('jumpAndActivateSegment: video.paused 상태:', this.video.paused);
       this.video.currentTime = segment.start;
       this.activateSegment(segmentId);
+
+      // 영상이 정지 상태면 재생 시작
+      if (this.video.paused) {
+        console.log('jumpAndActivateSegment: 영상 재생 시작');
+        this.video.play().catch((error) => {
+          console.error('jumpAndActivateSegment: 재생 실패:', error);
+        });
+      } else {
+        console.log('jumpAndActivateSegment: 영상이 이미 재생 중이므로 play() 호출 안 함');
+      }
     }
   }
 
@@ -854,7 +907,13 @@ export class YouTubeLoopPractice {
       return;
     }
 
+    console.log('[setSegmentStartTime] Start time 변경:', { segmentId, newStartTime: currentTime });
+
+    // 세그먼트의 start time을 현재 재생 위치로 업데이트
     this.updateSegment(segmentId, { start: currentTime });
+
+    // 현재 위치가 새 Start time이므로, 여기서부터 루프가 시작됨
+    // 별도의 seek 동작은 필요 없음 (이미 해당 위치에 있음)
   }
 
   private async setSegmentEndTime(segmentId: string) {
@@ -890,7 +949,142 @@ export class YouTubeLoopPractice {
     this.updateSegment(segmentId, { rate: newRate });
   }
 
-  // 오버레이 관련 메서드는 팝업 기반으로 변경되어 더 이상 사용하지 않음
+  /**
+   * 특정 세그먼트의 End Time부터 8마디를 추가한 새 루프를 생성합니다.
+   * 새 루프는 기준 세그먼트 바로 다음에 삽입됩니다.
+   */
+  private add8BarsAfterSegment(segmentId: string) {
+    if (!this.profile || !this.video) return;
+
+    const segment = this.profile.segments.find(s => s.id === segmentId);
+    if (!segment) return;
+
+    // BPM과 박자표가 설정되어 있어야 함
+    const bpm = this.profile.tempo;
+    const timeSignature = this.profile.timeSignature;
+    if (!bpm || !timeSignature) {
+      console.log('add8BarsAfterSegment: BPM 또는 박자표가 설정되지 않음');
+      return;
+    }
+
+    // 8마디의 길이(초) 계산
+    const duration8Bars = barsToSeconds(8, bpm, timeSignature);
+
+    // 새 세그먼트의 시작/끝 시간
+    const newStart = segment.end;
+    const newEnd = Math.min(newStart + duration8Bars, this.video.duration);
+
+    // 새 세그먼트 생성
+    const safeDefaultRate = typeof this.profile.defaultRate === 'number' && !isNaN(this.profile.defaultRate)
+      ? this.profile.defaultRate
+      : 1.0;
+
+    // 라벨: "{원본카드라벨} ~ 8 bars"
+    const originalLabel = segment.label || 'Loop';
+    const newLabel = `${originalLabel} ~ 8 bars`;
+
+    const newSegment: LoopSegment = {
+      id: Math.random().toString(36).substring(2, 15),
+      start: newStart,
+      end: newEnd,
+      rate: safeDefaultRate,
+      label: newLabel
+    };
+
+    // 기준 세그먼트 바로 다음 위치에 삽입
+    const segmentIndex = this.profile.segments.findIndex(s => s.id === segmentId);
+    this.updateProfile(profile => {
+      profile.segments.splice(segmentIndex + 1, 0, newSegment);
+    });
+
+    console.log(`8마디 추가: ${newSegment.label} (${newStart.toFixed(3)}s ~ ${newEnd.toFixed(3)}s)`);
+
+    // 생성된 카드로 스크롤
+    this.scrollToSegment(newSegment.id);
+  }
+
+  /**
+   * 세그먼트를 복제합니다.
+   * 새 카드의 이름은 "{원본카드} copy", "{원본카드} copy 2", ... 형식입니다.
+   */
+  private duplicateSegment(segmentId: string) {
+    if (!this.profile) return;
+
+    const segment = this.profile.segments.find(s => s.id === segmentId);
+    if (!segment) return;
+
+    // 복사본 라벨 생성
+    const newLabel = this.generateCopyLabel(segment.label || 'Loop');
+
+    const newSegment: LoopSegment = {
+      id: Math.random().toString(36).substring(2, 15),
+      start: segment.start,
+      end: segment.end,
+      rate: segment.rate,
+      label: newLabel,
+      metronomeEnabled: segment.metronomeEnabled
+    };
+
+    // 기준 세그먼트 바로 다음 위치에 삽입
+    const segmentIndex = this.profile.segments.findIndex(s => s.id === segmentId);
+    this.updateProfile(profile => {
+      profile.segments.splice(segmentIndex + 1, 0, newSegment);
+    });
+
+    console.log(`세그먼트 복제: ${segment.label} → ${newLabel}`);
+
+    // 생성된 카드로 스크롤
+    this.scrollToSegment(newSegment.id);
+  }
+
+  /**
+   * 복사본 라벨을 생성합니다.
+   * 기존 라벨들을 확인하여 "copy", "copy 2", "copy 3" 등의 번호를 결정합니다.
+   */
+  private generateCopyLabel(originalLabel: string): string {
+    if (!this.profile) return `${originalLabel} copy`;
+
+    // 원본 라벨에서 " copy" 또는 " copy N" 패턴 제거하여 베이스 라벨 추출
+    const baseLabel = originalLabel.replace(/ copy( \d+)?$/, '');
+
+    // 현재 존재하는 copy 번호들 수집
+    const copyPattern = new RegExp(`^${this.escapeRegExp(baseLabel)} copy( (\\d+))?$`);
+    const existingNumbers: number[] = [];
+
+    for (const seg of this.profile.segments) {
+      const match = seg.label?.match(copyPattern);
+      if (match) {
+        // "copy"만 있으면 1, "copy N"이면 N
+        const num = match[2] ? parseInt(match[2], 10) : 1;
+        existingNumbers.push(num);
+      }
+    }
+
+    // 다음 번호 결정
+    if (existingNumbers.length === 0) {
+      return `${baseLabel} copy`;
+    }
+
+    const maxNumber = Math.max(...existingNumbers);
+    return `${baseLabel} copy ${maxNumber + 1}`;
+  }
+
+  /**
+   * 정규식 특수문자 이스케이프
+   */
+  private escapeRegExp(str: string): string {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  /**
+   * 특정 세그먼트로 스크롤합니다.
+   */
+  private scrollToSegment(segmentId: string) {
+    // UI 렌더링 완료 후 스크롤 실행
+    setTimeout(() => {
+      this.uiController?.scrollToSegment(segmentId);
+    }, 50);
+  }
 
   private updateProfile(updater: (profile: VideoProfile) => void) {
     if (!this.profile) return;
@@ -933,10 +1127,17 @@ export class YouTubeLoopPractice {
   }
 
   cleanup() {
+    console.log('Loop Practice for YouTube 정리 시작, 이전 videoId:', this.videoId);
     this.isInitialized = false;
 
     // 카운트인 정지
     this.countIn.stop();
+
+    // 루프 컨트롤러 정리
+    if (this.loopController) {
+      this.loopController.dispose();
+      this.loopController = undefined;
+    }
 
     // UI 제거
     if (this.uiController) {
@@ -944,13 +1145,13 @@ export class YouTubeLoopPractice {
       this.uiController = undefined;
     }
 
-    // 이벤트 리스너 제거
-    if (this.video) {
-      this.video.removeEventListener('timeupdate', () => {});
-    }
+    // 프로필 및 비디오 참조 초기화
+    this.profile = undefined;
+    this.video = undefined;
+    // videoId는 유지하여 다음 init()에서 영상 변경 감지 가능
 
+    // 이벤트 리스너 제거
     window.removeEventListener('keydown', this.handleKeydown.bind(this));
-    chrome.runtime.onMessage.removeListener(this.handleMessage.bind(this));
 
     console.log('Loop Practice for YouTube 정리 완료');
   }
