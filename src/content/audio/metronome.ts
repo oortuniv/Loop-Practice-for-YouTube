@@ -2,7 +2,7 @@ import { parseTimeSignature } from '../../utils';
 
 /**
  * 메트로놈 클래스
- * Web Audio API를 사용하여 정확한 타이밍의 클릭음 생성
+ * Web Audio API를 사용하여 나무 메트로놈 스타일의 클릭음 생성
  * Look-ahead 스케줄링으로 100ms 앞서 스케줄, 25ms마다 체크
  */
 export class Metronome {
@@ -18,27 +18,50 @@ export class Metronome {
   private readonly SCHEDULE_AHEAD_TIME = 0.1; // 100ms 앞서 스케줄
   private readonly SCHEDULER_INTERVAL = 25; // 25ms마다 체크
 
-  // 클릭음 설정 (메트로놈 임시 비활성화로 현재 미사용)
-  // private readonly DOWNBEAT_FREQUENCY = 800; // 첫 박 (낮은 음)
-  // private readonly BEAT_FREQUENCY = 1200; // 다른 박 (높은 음)
-  // private readonly DOWNBEAT_VOLUME = 0.5; // 첫 박 볼륨
-  // private readonly BEAT_VOLUME = 0.3; // 다른 박 볼륨
-  // private readonly CLICK_DURATION = 0.05; // 50ms
-
   // 클릭음 시간 캐싱
   private cachedBeats: Array<{ time: number; beatNumber: number }> = [];
   private cacheKey: string = '';
   private loopDuration: number = 0;
+
+  // 볼륨 설정 (0.0 ~ 1.0, 실제 출력은 MAX_VOLUME을 곱함)
+  private volume: number = 0.8;
+  // 최대 볼륨 승수 (YouTube 볼륨과 비슷한 수준으로 설정)
+  private readonly MAX_VOLUME = 3.0;
 
   constructor() {
     // AudioContext는 start 시점에 생성 (사용자 상호작용 필요)
   }
 
   /**
+   * 메트로놈 볼륨 설정
+   * @param volume 볼륨 (0.0 ~ 1.0)
+   */
+  setVolume(volume: number): void {
+    this.volume = Math.max(0, Math.min(1, volume));
+  }
+
+  /**
+   * 현재 볼륨 가져오기
+   */
+  getVolume(): number {
+    return this.volume;
+  }
+
+  /**
+   * AudioContext를 가져오거나 생성합니다.
+   */
+  getAudioContext(): AudioContext {
+    if (!this.audioContext) {
+      this.audioContext = new AudioContext();
+    }
+    return this.audioContext;
+  }
+
+  /**
    * 메트로놈 시작
    * @param bpm BPM (beats per minute)
    * @param timeSignature 박자표 (예: "4/4")
-   * @param startOffset 시작 오프셋 (초 단위, 비디오 currentTime)
+   * @param startOffset 시작 오프셋 (초 단위, 비디오 currentTime - globalMetronomeOffset)
    * @param loopDuration 루프 길이 (초 단위, 옵션)
    */
   start(bpm: number, timeSignature: string, startOffset: number = 0, loopDuration?: number): void {
@@ -50,11 +73,12 @@ export class Metronome {
     }
 
     // AudioContext 초기화
-    if (!this.audioContext) {
-      this.audioContext = new AudioContext();
-      console.log('[Metronome] AudioContext 생성:', this.audioContext.state);
-    } else {
-      console.log('[Metronome] 기존 AudioContext 사용:', this.audioContext.state);
+    const ctx = this.getAudioContext();
+    console.log('[Metronome] AudioContext 상태:', ctx.state);
+
+    // suspended 상태면 resume
+    if (ctx.state === 'suspended') {
+      ctx.resume();
     }
 
     this.bpm = bpm;
@@ -66,19 +90,32 @@ export class Metronome {
 
     // 캐시가 유효하지 않으면 재계산
     if (newCacheKey !== this.cacheKey || this.cachedBeats.length === 0) {
-      console.log('[Metronome] 클릭음 시간 캐시 생성 중...');
       this.cacheKey = newCacheKey;
       this.loopDuration = loopDuration || 0;
       this.generateBeatCache();
-    } else {
-      console.log('[Metronome] 캐시된 클릭음 시간 사용');
     }
 
-    // 시작 오프셋 기반으로 현재 beat 계산
-    this.currentBeat = this.calculateBeatOffset(startOffset);
+    // beat 계산 관련 상수
+    const beatDuration = 60 / this.bpm;
+    const totalBeats = startOffset / beatDuration;
+    const beatProgress = totalBeats - Math.floor(totalBeats); // 0~1 사이의 진행률
 
-    // 첫 번째 beat 시간 설정 (AudioContext 시간 기준)
-    this.nextBeatTime = this.audioContext.currentTime;
+    // 현재 시점에서 다음에 재생할 beat 번호 계산
+    // beatProgress가 0.01 미만이면 정확히 beat 경계에 있는 것으로 간주
+    const isOnBeatBoundary = beatProgress < 0.01 || beatProgress > 0.99;
+    let timeToNextBeat: number;
+
+    if (isOnBeatBoundary) {
+      // beat 경계에 있으면 현재 beat부터 시작
+      this.currentBeat = Math.round(totalBeats) % this.beatsPerBar;
+      this.nextBeatTime = ctx.currentTime; // 즉시 재생
+      timeToNextBeat = 0;
+    } else {
+      // beat 중간에 있으면 다음 beat까지 대기
+      this.currentBeat = Math.ceil(totalBeats) % this.beatsPerBar;
+      timeToNextBeat = (1 - beatProgress) * beatDuration;
+      this.nextBeatTime = ctx.currentTime + timeToNextBeat;
+    }
 
     this.isPlaying = true;
 
@@ -87,8 +124,7 @@ export class Metronome {
       beatsPerBar: this.beatsPerBar,
       currentBeat: this.currentBeat,
       nextBeatTime: this.nextBeatTime,
-      audioContextTime: this.audioContext.currentTime,
-      cachedBeatsCount: this.cachedBeats.length
+      timeToNextBeat
     });
 
     // 스케줄러 시작
@@ -107,8 +143,6 @@ export class Metronome {
       clearInterval(this.schedulerTimer);
       this.schedulerTimer = null;
     }
-
-    // AudioContext는 재사용을 위해 유지 (close하지 않음)
   }
 
   /**
@@ -119,31 +153,47 @@ export class Metronome {
   }
 
   /**
-   * 비디오 시간 기반으로 beat 오프셋 계산
-   * @param videoTime 비디오 currentTime (초)
-   * @returns 현재 beat 번호 (0부터 시작)
+   * 비디오 시간 기반으로 다음에 재생할 beat 번호 계산
+   * @param videoTime 비디오 currentTime - globalMetronomeOffset (초)
+   * @returns 다음에 재생할 beat 번호 (0부터 시작, 0=1박/downbeat)
    */
   calculateBeatOffset(videoTime: number): number {
     const beatDuration = 60 / this.bpm;
     const totalBeats = videoTime / beatDuration;
-    // 마디 내에서의 beat 위치 (0 ~ beatsPerBar-1)
-    return Math.floor(totalBeats % this.beatsPerBar);
+    // 다음에 재생할 beat 번호 (현재 beat + 1)
+    // ceil을 사용하여 다음 beat를 가리키도록 함
+    // 예: 8.4 beats → ceil(8.4) = 9 → 9 % 4 = 1 (2번째 박)
+    // 예: 8.0 beats (정확히 beat 경계) → ceil(8.0) = 8 → 8 % 4 = 0 (1번째 박)
+    return Math.ceil(totalBeats) % this.beatsPerBar;
   }
 
   /**
    * Beat를 다시 동기화 (loop 점프 시 사용)
-   * @param videoTime 새로운 비디오 currentTime (초)
+   * @param videoTime 새로운 비디오 currentTime - globalMetronomeOffset (초)
    */
   resync(videoTime: number): void {
     if (!this.isPlaying || !this.audioContext) {
       return;
     }
 
-    // 현재 beat 재계산
-    this.currentBeat = this.calculateBeatOffset(videoTime);
+    // beat 계산 관련 상수
+    const beatDuration = 60 / this.bpm;
+    const totalBeats = videoTime / beatDuration;
+    const beatProgress = totalBeats - Math.floor(totalBeats); // 0~1 사이의 진행률
 
-    // 다음 beat 시간을 현재 시간으로 재설정
-    this.nextBeatTime = this.audioContext.currentTime;
+    // beat 경계 판단 (0.01 = 1% 허용 오차)
+    const isOnBeatBoundary = beatProgress < 0.01 || beatProgress > 0.99;
+
+    if (isOnBeatBoundary) {
+      // beat 경계에 있으면 현재 beat부터 시작
+      this.currentBeat = Math.round(totalBeats) % this.beatsPerBar;
+      this.nextBeatTime = this.audioContext.currentTime;
+    } else {
+      // beat 중간에 있으면 다음 beat까지 대기
+      this.currentBeat = Math.ceil(totalBeats) % this.beatsPerBar;
+      const timeToNextBeat = (1 - beatProgress) * beatDuration;
+      this.nextBeatTime = this.audioContext.currentTime + timeToNextBeat;
+    }
   }
 
   /**
@@ -158,62 +208,133 @@ export class Metronome {
     const currentTime = this.audioContext.currentTime;
 
     // Look-ahead 윈도우 내의 모든 beat 스케줄
-    let scheduledCount = 0;
     while (this.nextBeatTime < currentTime + this.SCHEDULE_AHEAD_TIME) {
       this.scheduleClick(this.nextBeatTime, this.currentBeat);
-      scheduledCount++;
 
       // 다음 beat 계산
       const beatDuration = 60 / this.bpm;
       this.nextBeatTime += beatDuration;
       this.currentBeat = (this.currentBeat + 1) % this.beatsPerBar;
     }
-
-    if (scheduledCount > 0) {
-      console.log(`[Metronome] 스케줄링됨: ${scheduledCount}개 beat, 다음 beat 시간: ${this.nextBeatTime.toFixed(3)}`);
-    }
   }
 
   /**
-   * 개별 클릭음 스케줄링
-   * @param _when 재생 시간 (AudioContext.currentTime 기준)
-   * @param _beatNumber 현재 beat 번호 (0 = 첫 박)
-   *
-   * 임시 비활성화: 메트로놈 기능이 의도대로 동작하지 않아 소리 재생 중단
+   * 나무 메트로놈 스타일의 클릭음을 스케줄링합니다.
+   * 화이트 노이즈 + 필터로 "틱" 소리 생성
    */
-  private scheduleClick(_when: number, _beatNumber: number): void {
-    // 메트로놈 소리 재생 비활성화 (로직은 유지)
-    return;
-
-    /* 원본 로직 보존 (향후 재활성화 대비)
+  private scheduleClick(when: number, beatNumber: number): void {
     if (!this.audioContext) {
-      console.warn('[Metronome] scheduleClick: AudioContext가 없음');
       return;
     }
 
-    // 첫 박 여부에 따라 음높이와 볼륨 결정
     const isDownbeat = beatNumber === 0;
-    const frequency = isDownbeat ? this.DOWNBEAT_FREQUENCY : this.BEAT_FREQUENCY;
-    const volume = isDownbeat ? this.DOWNBEAT_VOLUME : this.BEAT_VOLUME;
+    this.playWoodClick(this.audioContext, when, isDownbeat);
+  }
 
-    console.log(`[Metronome] 클릭음 스케줄링: beat=${beatNumber}, when=${when.toFixed(3)}, freq=${frequency}Hz, vol=${volume}, isDownbeat=${isDownbeat}`);
+  /**
+   * 나무 메트로놈 클릭음을 재생합니다.
+   * @param ctx AudioContext
+   * @param when 재생 시간
+   * @param isDownbeat 첫 박 여부
+   */
+  private playWoodClick(ctx: AudioContext, when: number, isDownbeat: boolean): void {
+    // 기본 볼륨에 전역 볼륨과 MAX_VOLUME을 곱함
+    const baseVolume = isDownbeat ? 1.0 : 0.6;
+    const finalVolume = baseVolume * this.volume * this.MAX_VOLUME;
+    const pitchMultiplier = isDownbeat ? 1.0 : 1.3; // 첫 박은 낮은 음, 나머지는 높은 음
 
-    // Oscillator 생성 (sine wave)
-    const osc = this.audioContext.createOscillator();
-    const gainNode = this.audioContext.createGain();
+    // 1. 노이즈 버스트 생성 (짧은 화이트 노이즈)
+    const noiseBuffer = this.createNoiseBuffer(ctx, 0.02); // 20ms
+    const noiseSource = ctx.createBufferSource();
+    noiseSource.buffer = noiseBuffer;
 
-    osc.connect(gainNode);
-    gainNode.connect(this.audioContext.destination);
+    // 2. 밴드패스 필터 (나무 특성 주파수)
+    const bandpass = ctx.createBiquadFilter();
+    bandpass.type = 'bandpass';
+    bandpass.frequency.value = 1800 * pitchMultiplier; // 첫 박: 1800Hz, 다른 박: 2340Hz
+    bandpass.Q.value = 2;
 
-    osc.frequency.value = frequency;
+    // 3. 하이패스 필터 (저음 제거)
+    const highpass = ctx.createBiquadFilter();
+    highpass.type = 'highpass';
+    highpass.frequency.value = 400;
 
-    // 엔벨로프: 빠르게 시작 → 빠르게 페이드아웃
-    gainNode.gain.setValueAtTime(volume, when);
-    gainNode.gain.exponentialRampToValueAtTime(0.01, when + this.CLICK_DURATION);
+    // 4. 게인 엔벨로프
+    const gainNode = ctx.createGain();
+    gainNode.gain.setValueAtTime(0, when);
+    gainNode.gain.linearRampToValueAtTime(finalVolume, when + 0.001); // 1ms attack
+    gainNode.gain.exponentialRampToValueAtTime(0.001, when + 0.025); // 25ms decay
+
+    // 연결
+    noiseSource.connect(bandpass);
+    bandpass.connect(highpass);
+    highpass.connect(gainNode);
+    gainNode.connect(ctx.destination);
+
+    // 재생
+    noiseSource.start(when);
+    noiseSource.stop(when + 0.03);
+
+    // 5. 추가 톤 (나무 울림감)
+    const osc = ctx.createOscillator();
+    const oscGain = ctx.createGain();
+
+    osc.type = 'sine';
+    osc.frequency.value = isDownbeat ? 800 : 1000;
+
+    oscGain.gain.setValueAtTime(0, when);
+    oscGain.gain.linearRampToValueAtTime(finalVolume * 0.3, when + 0.001);
+    oscGain.gain.exponentialRampToValueAtTime(0.001, when + 0.015);
+
+    osc.connect(oscGain);
+    oscGain.connect(ctx.destination);
 
     osc.start(when);
-    osc.stop(when + this.CLICK_DURATION);
-    */
+    osc.stop(when + 0.02);
+  }
+
+  /**
+   * 화이트 노이즈 버퍼를 생성합니다.
+   */
+  private createNoiseBuffer(ctx: AudioContext, duration: number): AudioBuffer {
+    const sampleRate = ctx.sampleRate;
+    const bufferSize = Math.ceil(sampleRate * duration);
+    const buffer = ctx.createBuffer(1, bufferSize, sampleRate);
+    const data = buffer.getChannelData(0);
+
+    for (let i = 0; i < bufferSize; i++) {
+      data[i] = Math.random() * 2 - 1;
+    }
+
+    return buffer;
+  }
+
+  /**
+   * 단일 클릭음을 즉시 재생합니다 (TAP Sync 피드백용).
+   * 최소 레이턴시를 위해 ctx.currentTime을 직접 사용합니다.
+   * @param isDownbeat 첫 박 여부
+   */
+  playClickNow(isDownbeat: boolean): void {
+    const ctx = this.getAudioContext();
+
+    // suspended 상태면 resume (비동기지만 즉시 재생 시도)
+    if (ctx.state === 'suspended') {
+      ctx.resume();
+    }
+
+    // 즉시 재생 (ctx.currentTime은 가장 빠른 재생 시점)
+    this.playWoodClick(ctx, ctx.currentTime, isDownbeat);
+  }
+
+  /**
+   * AudioContext를 워밍업합니다.
+   * 사용자 첫 상호작용 시 호출하면 이후 재생 레이턴시가 줄어듭니다.
+   */
+  warmup(): void {
+    const ctx = this.getAudioContext();
+    if (ctx.state === 'suspended') {
+      ctx.resume();
+    }
   }
 
   /**
@@ -257,6 +378,6 @@ export class Metronome {
       this.cachedBeats.push({ time, beatNumber });
     }
 
-    console.log(`[Metronome] Beat 캐시 생성 완료: ${this.cachedBeats.length}개 beats, duration=${maxDuration.toFixed(2)}s`);
+    console.log(`[Metronome] Beat 캐시 생성 완료: ${this.cachedBeats.length}개 beats`);
   }
 }

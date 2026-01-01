@@ -2,6 +2,7 @@
 import { VideoProfile, LoopSegment } from '../types';
 import { YouTubeUI } from './ui';
 import { barsToSeconds, secondsToBars } from '../utils';
+import { Metronome } from './audio/metronome';
 
 export class UIController {
   private ui: YouTubeUI;
@@ -11,9 +12,20 @@ export class UIController {
   private isDarkTheme: boolean = false;
   private collapsedSegments: Map<string, boolean> = new Map(); // 세그먼트별 접힌 상태 저장
   private draggedSegmentId: string | null = null; // 드래그 중인 세그먼트 ID
-  private globalSyncMetronomeEnabled: boolean = false; // 글로벌 싱크 메트로놈 상태
   private lastClickTime: Map<string, number> = new Map(); // 더블클릭 감지용 마지막 클릭 시간
   private openBarsDropdownId: string | null = null; // 현재 열린 bars 드롭다운 ID
+
+  // Tap Sync 관련 상태
+  private tapSyncCurrentBeat: number = 0; // 현재 박자 (1, 2, 3, 4... 0이면 초기 상태)
+  private tapSyncMetronome: Metronome = new Metronome(); // TAP 피드백용 메트로놈
+  private isGlobalMetronomeEnabled: boolean = false; // 글로벌 메트로놈 활성화 상태
+  private metronomeVolume: number = 80; // 메트로놈 볼륨 (0-100)
+
+  // TAP Sync 정밀도 향상을 위한 탭 기록
+  // { beatNumber: 1-4, tappedTime: video.currentTime, calculatedOffset: 첫박 기준 오프셋 }
+  private tapSyncHistory: Array<{ beatNumber: number; tappedTime: number; calculatedOffset: number }> = [];
+  private tapSyncScore: number = 0; // 0-100 점수
+  private tapSyncLastResetTime: number = 0; // 마지막 리셋 시간
 
   constructor() {
     this.ui = new YouTubeUI();
@@ -114,13 +126,6 @@ export class UIController {
   }
 
   /**
-   * 글로벌 싱크 메트로놈이 활성화되어 있는지 확인합니다.
-   */
-  private isGlobalSyncMetronomeActive(): boolean {
-    return this.globalSyncMetronomeEnabled;
-  }
-
-  /**
    * 메트로놈 버튼의 툴팁 텍스트를 반환합니다.
    */
   private getMetronomeTooltip(isLoopActive: boolean): string {
@@ -145,13 +150,6 @@ export class UIController {
 
     // 메트로놈 사용 가능한 상태
     return 'Toggle metronome click sound';
-  }
-
-  /**
-   * 싱크 오프셋을 포맷팅합니다 (xx.xxx 형식).
-   */
-  private formatSyncOffset(offset: number): string {
-    return offset.toFixed(3);
   }
 
   /**
@@ -222,7 +220,7 @@ export class UIController {
             <div class="global-settings">
               <div class="settings-row">
                 <div class="setting-group">
-                  <label>Tempo (BPM)ㄴ</label>
+                  <label>Tempo (BPM)</label>
                   <div class="tempo-controls">
                     <input type="text" id="tempoInput" class="tempo-input" value="${tempo || '---'}" data-placeholder="---">
                     <button class="btn btn-small btn-tap" id="tapTempo">TAP</button>
@@ -247,38 +245,8 @@ export class UIController {
                 </div>
               </div>
 
-              <!-- Global Sync 기능 임시 숨김 (로직은 유지) -->
-              <!--
-              <div class="setting-group global-sync-group" style="display: none;">
-                <label>Global Sync:</label>
-                <div class="sync-controls">
-                  <button
-                    class="btn-metronome ${this.isGlobalSyncMetronomeActive() ? 'active' : ''}"
-                    id="globalSyncMetronome"
-                    ${!tempo || !timeSignature ? 'disabled' : ''}
-                    title="Toggle metronome for global sync adjustment"
-                  >
-                    ♪
-                  </button>
-                  <input
-                    type="text"
-                    id="globalSyncInput"
-                    class="sync-input"
-                    value="${this.formatSyncOffset(this.profile.globalMetronomeOffset || 0)}"
-                    ${!tempo || !timeSignature ? 'disabled' : ''}
-                  >
-                  <span class="sync-unit">s</span>
-                  <button
-                    class="btn btn-small btn-sync"
-                    id="syncGlobal"
-                    ${!tempo || !timeSignature ? 'disabled' : ''}
-                    title="Apply global sync to all loops"
-                  >
-                    SYNC
-                  </button>
-                </div>
-              </div>
-              -->
+              <!-- Tap Sync -->
+              ${this.getTapSyncHTML(tempo, timeSignature)}
             </div>
           </div>
 
@@ -322,6 +290,100 @@ export class UIController {
         </div>
       </div>
     `;
+  }
+
+  /**
+   * Tap Sync UI HTML을 생성합니다.
+   */
+  private getTapSyncHTML(tempo: number | undefined, timeSignature: string | undefined): string {
+    const isEnabled = tempo && timeSignature;
+    const beatsPerBar = timeSignature ? parseInt(timeSignature.split('/')[0], 10) : 4;
+    const firstBeatTime = this.profile?.globalMetronomeOffset;
+    const hasFirstBeat = typeof firstBeatTime === 'number';
+
+    // 현재 박자 표시 (1, 2, 3, 4 중 하나)
+    const currentBeatDisplay = this.tapSyncCurrentBeat > 0
+      ? `${this.tapSyncCurrentBeat}/${beatsPerBar}`
+      : 'TAP';
+
+    // 점수에 따른 색상 (신호등 색깔)
+    const scoreColor = this.getScoreColor(this.tapSyncScore);
+    const tapCount = this.tapSyncHistory.length;
+
+    return `
+      <div class="setting-group tap-sync-group" ${!isEnabled ? 'style="display: none;"' : ''}>
+        <label>Beat Sync <span class="sync-hint">(wired headphones recommended)</span></label>
+        <div class="tap-sync-controls">
+          <div class="tap-sync-row">
+            <button
+              class="btn btn-tap-sync ${this.tapSyncCurrentBeat > 0 ? 'tapped' : ''}"
+              id="tapSyncBtn"
+              title="Tap along with the beat. Each tap refines the sync accuracy."
+            >
+              ${currentBeatDisplay}
+            </button>
+            ${tapCount > 0 ? `
+              <div class="tap-sync-score" style="color: ${scoreColor};" title="Sync accuracy (${tapCount} taps)">
+                ${tapCount >= 2 ? `${this.tapSyncScore}%` : '...'}
+              </div>
+            ` : `
+              <span class="tap-sync-hint">← Tap along</span>
+            `}
+          </div>
+          ${hasFirstBeat ? `
+            <div class="sync-result-row">
+              <span class="sync-result-label">1st Beat:</span>
+              <span class="sync-result-value">${this.formatSyncTime(firstBeatTime)}</span>
+              <button class="btn-fine-tune" id="syncMinus1" title="-1ms">-1</button>
+              <button class="btn-fine-tune" id="syncMinus10" title="-10ms">-10</button>
+              <button class="btn-fine-tune" id="syncPlus10" title="+10ms">+10</button>
+              <button class="btn-fine-tune" id="syncPlus1" title="+1ms">+1</button>
+              <button class="btn-sync-clear" id="syncClear" title="Clear sync">✕</button>
+            </div>
+            <div class="metronome-toggle-row">
+              <button
+                class="btn btn-metronome-toggle ${this.isGlobalMetronomeEnabled ? 'active' : ''}"
+                id="globalMetronomeToggle"
+                title="Toggle metronome on/off"
+              >
+                <span class="metronome-icon">♪</span>
+                <span class="metronome-label">${this.isGlobalMetronomeEnabled ? 'Metronome ON' : 'Metronome OFF'}</span>
+              </button>
+              <div class="metronome-volume-control">
+                <span class="volume-icon" title="Volume">🔊</span>
+                <input
+                  type="range"
+                  id="metronomeVolume"
+                  class="volume-slider"
+                  min="0"
+                  max="100"
+                  value="${this.metronomeVolume}"
+                  title="Metronome volume: ${this.metronomeVolume}%"
+                />
+              </div>
+            </div>
+          ` : ''}
+        </div>
+      </div>
+    `;
+  }
+
+  /**
+   * 점수에 따른 색상 반환 (신호등 색깔)
+   */
+  private getScoreColor(score: number): string {
+    if (score >= 80) return '#4caf50'; // 초록 (좋음)
+    if (score >= 50) return '#ff9800'; // 주황 (보통)
+    return '#f44336'; // 빨강 (나쁨)
+  }
+
+  /**
+   * 싱크 시간을 포맷팅합니다 (m:ss.xxx 형식).
+   */
+  private formatSyncTime(seconds: number): string {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toFixed(3).padStart(6, '0')}`;
   }
 
   /**
@@ -725,6 +787,231 @@ export class UIController {
         cursor: not-allowed;
       }
 
+      /* Tap Sync 스타일 */
+      .tap-sync-group {
+        margin-top: 12px;
+        padding-top: 12px;
+        border-top: 1px solid ${borderColor};
+      }
+
+      .sync-hint {
+        font-size: 10px;
+        font-weight: 400;
+        color: ${textSecondary};
+        opacity: 0.8;
+      }
+
+      .tap-sync-controls {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .tap-sync-row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+
+      .btn-tap-sync {
+        flex: 0 0 auto;
+        min-width: 80px;
+        padding: 8px 12px;
+        background: ${this.isDarkTheme ? '#3f3f3f' : '#e0e0e0'};
+        color: ${textPrimary};
+        border: 1px solid ${inputBorder};
+        border-radius: 4px;
+        font-size: 13px;
+        font-weight: 600;
+        font-family: 'Roboto Mono', monospace;
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+
+      .btn-tap-sync:hover {
+        background: ${this.isDarkTheme ? '#505050' : '#d0d0d0'};
+      }
+
+      .btn-tap-sync:active {
+        background: #065fd4;
+        color: white;
+        transform: scale(0.98);
+      }
+
+      .btn-tap-sync.tapped {
+        background: ${this.isDarkTheme ? '#1a3a1a' : '#e8f5e9'};
+        border-color: #4caf50;
+        color: ${this.isDarkTheme ? '#81c784' : '#2e7d32'};
+      }
+
+      .tap-sync-hint {
+        font-size: 11px;
+        color: ${textSecondary};
+        opacity: 0.8;
+      }
+
+      .tap-sync-score {
+        font-size: 14px;
+        font-weight: 600;
+        min-width: 40px;
+        text-align: center;
+        padding: 4px 8px;
+        border-radius: 4px;
+        background: ${this.isDarkTheme ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)'};
+      }
+
+      .sync-result-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 8px;
+        background: ${this.isDarkTheme ? '#1a3a1a' : '#e8f5e9'};
+        border-radius: 4px;
+        border: 1px solid ${this.isDarkTheme ? '#2e7d32' : '#a5d6a7'};
+      }
+
+      .sync-result-label {
+        font-size: 12px;
+        color: ${textSecondary};
+      }
+
+      .sync-result-value {
+        font-size: 13px;
+        font-weight: 600;
+        font-family: 'Roboto Mono', monospace;
+        color: ${this.isDarkTheme ? '#81c784' : '#2e7d32'};
+      }
+
+      .btn-fine-tune {
+        padding: 4px 8px;
+        background: ${this.isDarkTheme ? '#3f3f3f' : '#ffffff'};
+        color: ${textPrimary};
+        border: 1px solid ${inputBorder};
+        border-radius: 3px;
+        font-size: 11px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+
+      .btn-fine-tune:hover {
+        background: ${this.isDarkTheme ? '#505050' : '#f0f0f0'};
+      }
+
+      .btn-fine-tune:active {
+        background: #065fd4;
+        color: white;
+      }
+
+      .btn-sync-clear {
+        margin-left: auto;
+        padding: 4px 8px;
+        background: transparent;
+        color: ${textSecondary};
+        border: 1px solid transparent;
+        border-radius: 3px;
+        font-size: 12px;
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+
+      .btn-sync-clear:hover {
+        background: ${this.isDarkTheme ? 'rgba(244, 67, 54, 0.2)' : 'rgba(244, 67, 54, 0.1)'};
+        color: #f44336;
+        border-color: #f44336;
+      }
+
+      .metronome-toggle-row {
+        margin-top: 8px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .btn-metronome-toggle {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex: 1;
+        padding: 10px 12px;
+        background: ${this.isDarkTheme ? '#3f3f3f' : '#e8e8e8'};
+        color: ${textPrimary};
+        border: 1px solid ${inputBorder};
+        border-radius: 4px;
+        font-size: 13px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+
+      .btn-metronome-toggle:hover {
+        background: ${this.isDarkTheme ? '#505050' : '#d8d8d8'};
+      }
+
+      .btn-metronome-toggle.active {
+        background: ${this.isDarkTheme ? '#1a3a5c' : '#e3f2fd'};
+        border-color: #2196f3;
+        color: ${this.isDarkTheme ? '#90caf9' : '#1976d2'};
+      }
+
+      .btn-metronome-toggle.active:hover {
+        background: ${this.isDarkTheme ? '#1e4a6f' : '#bbdefb'};
+      }
+
+      .metronome-icon {
+        font-size: 16px;
+      }
+
+      .metronome-label {
+        flex: 1;
+        text-align: left;
+      }
+
+      .metronome-volume-control {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 6px 8px;
+        background: ${this.isDarkTheme ? '#3f3f3f' : '#e8e8e8'};
+        border: 1px solid ${inputBorder};
+        border-radius: 4px;
+      }
+
+      .volume-icon {
+        font-size: 14px;
+        opacity: 0.8;
+      }
+
+      .volume-slider {
+        width: 60px;
+        height: 4px;
+        -webkit-appearance: none;
+        appearance: none;
+        background: ${this.isDarkTheme ? '#555' : '#ccc'};
+        border-radius: 2px;
+        outline: none;
+        cursor: pointer;
+      }
+
+      .volume-slider::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        appearance: none;
+        width: 12px;
+        height: 12px;
+        background: #2196f3;
+        border-radius: 50%;
+        cursor: pointer;
+      }
+
+      .volume-slider::-moz-range-thumb {
+        width: 12px;
+        height: 12px;
+        background: #2196f3;
+        border-radius: 50%;
+        cursor: pointer;
+        border: none;
+      }
+
       .controls-section {
         background: ${bgSecondary};
         border-radius: 8px;
@@ -844,7 +1131,7 @@ export class UIController {
       }
 
       .segments-list {
-        max-height: 400px;
+        max-height: 500px;
         overflow-y: auto;
         background: transparent;
         border-radius: 8px;
@@ -1674,24 +1961,60 @@ export class UIController {
       timeSignatureSelect.addEventListener('change', (e) => this.handleTimeSignatureChange(e as Event));
     }
 
-    // Global Sync 입력
-    const globalSyncInput = this.ui.querySelector<HTMLInputElement>('#globalSyncInput');
-    if (globalSyncInput) {
-      this.preventYouTubeShortcuts(globalSyncInput);
-      globalSyncInput.addEventListener('change', (e) => this.handleGlobalSyncChange(e as Event));
-      globalSyncInput.addEventListener('mousedown', (e) => this.handleGlobalSyncInputMouseDown(e as MouseEvent));
+    // Tap Sync 버튼 - mousedown 사용으로 레이턴시 최소화
+    const tapSyncBtn = this.ui.querySelector('#tapSyncBtn');
+    if (tapSyncBtn) {
+      // mousedown은 click보다 빠름 (click은 mouseup 후 발생)
+      tapSyncBtn.addEventListener('mousedown', (e) => {
+        e.preventDefault(); // 텍스트 선택 방지
+        this.handleTapSync();
+      });
+      // 마우스 올릴 때 AudioContext 워밍업 (첫 클릭 레이턴시 감소)
+      tapSyncBtn.addEventListener('mouseenter', () => {
+        this.tapSyncMetronome.warmup();
+      });
     }
 
-    // Global Sync 버튼
-    const syncGlobalBtn = this.ui.querySelector('#syncGlobal');
-    if (syncGlobalBtn) {
-      syncGlobalBtn.addEventListener('click', () => this.handleSyncGlobal());
+    // 미세 조정 버튼들
+    const syncMinus1 = this.ui.querySelector('#syncMinus1');
+    if (syncMinus1) {
+      syncMinus1.addEventListener('click', () => this.handleSyncFineTune(-0.001));
     }
 
-    // Global Sync 메트로놈 버튼
-    const globalSyncMetronomeBtn = this.ui.querySelector('#globalSyncMetronome');
-    if (globalSyncMetronomeBtn) {
-      globalSyncMetronomeBtn.addEventListener('click', () => this.handleGlobalSyncMetronomeToggle());
+    const syncMinus10 = this.ui.querySelector('#syncMinus10');
+    if (syncMinus10) {
+      syncMinus10.addEventListener('click', () => this.handleSyncFineTune(-0.01));
+    }
+
+    const syncPlus10 = this.ui.querySelector('#syncPlus10');
+    if (syncPlus10) {
+      syncPlus10.addEventListener('click', () => this.handleSyncFineTune(0.01));
+    }
+
+    const syncPlus1 = this.ui.querySelector('#syncPlus1');
+    if (syncPlus1) {
+      syncPlus1.addEventListener('click', () => this.handleSyncFineTune(0.001));
+    }
+
+    // 싱크 초기화 버튼
+    const syncClear = this.ui.querySelector('#syncClear');
+    if (syncClear) {
+      syncClear.addEventListener('click', () => this.handleSyncClear());
+    }
+
+    // 글로벌 메트로놈 토글 버튼
+    const globalMetronomeToggle = this.ui.querySelector('#globalMetronomeToggle');
+    if (globalMetronomeToggle) {
+      globalMetronomeToggle.addEventListener('click', () => this.handleGlobalMetronomeToggle());
+    }
+
+    // 메트로놈 볼륨 슬라이더
+    const volumeSlider = this.ui.querySelector('#metronomeVolume') as HTMLInputElement;
+    if (volumeSlider) {
+      volumeSlider.addEventListener('input', (e) => {
+        const value = parseInt((e.target as HTMLInputElement).value, 10);
+        this.handleMetronomeVolumeChange(value);
+      });
     }
 
     // 세그먼트 관련 이벤트 (이벤트 위임 사용)
@@ -2811,116 +3134,219 @@ export class UIController {
   }
 
   /**
-   * Global Sync 입력 변경 핸들러
+   * Tap Sync 버튼 클릭 핸들러
+   * 모든 박자의 탭을 수집하여 첫박 오프셋을 정밀하게 계산합니다.
+   * 탭이 누적될수록 평균값이 더 정확해지고, 점수가 표시됩니다.
    */
-  private handleGlobalSyncChange(e: Event) {
-    const input = e.target as HTMLInputElement;
-    const value = parseFloat(input.value);
-
-    if (isNaN(value)) {
-      input.value = this.formatSyncOffset(this.profile?.globalMetronomeOffset || 0);
-      return;
-    }
-
-    // -999.999 ~ 999.999 범위로 제한
-    const clampedValue = Math.max(-999.999, Math.min(999.999, value));
-    input.value = this.formatSyncOffset(clampedValue);
-
-    this.onCommand?.('update-global-sync', { offset: clampedValue });
-  }
-
-  /**
-   * Global Sync 입력 마우스다운 핸들러 (드래그로 값 조정)
-   */
-  private handleGlobalSyncInputMouseDown(e: MouseEvent) {
-    const input = e.target as HTMLInputElement;
-    const startY = e.clientY;
-    const startValue = parseFloat(input.value) || 0;
-
-    let isDragging = false;
-    const dragThreshold = 3;
-    let lastValue = startValue;
-
-    const handleMouseMove = (moveEvent: MouseEvent) => {
-      const deltaY = startY - moveEvent.clientY;
-
-      if (!isDragging && Math.abs(deltaY) < dragThreshold) {
-        return;
-      }
-
-      isDragging = true;
-      input.style.cursor = 'ns-resize';
-
-      // 1px = 0.001s
-      const newValue = startValue + (deltaY * 0.001);
-      const clampedValue = Math.max(-999.999, Math.min(999.999, newValue));
-
-      input.value = this.formatSyncOffset(clampedValue);
-      lastValue = clampedValue;
-
-      // 실시간 업데이트 (저장하지 않고 메트로놈만 업데이트)
-      this.onCommand?.('update-global-sync-realtime', { offset: clampedValue });
-    };
-
-    const handleMouseUp = () => {
-      document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseup', handleMouseUp);
-      input.style.cursor = 'ns-resize';
-
-      if (isDragging) {
-        e.preventDefault();
-        // 드래그 종료 시 최종 값 저장
-        this.onCommand?.('update-global-sync', { offset: lastValue });
-      }
-    };
-
-    document.addEventListener('mousemove', handleMouseMove);
-    document.addEventListener('mouseup', handleMouseUp);
-  }
-
-  /**
-   * Global Sync 버튼 클릭 핸들러 (모든 루프에 싱크 적용)
-   */
-  private handleSyncGlobal() {
+  private handleTapSync() {
     if (!this.profile?.tempo || !this.profile?.timeSignature) {
       return;
     }
 
-    const offset = this.profile.globalMetronomeOffset || 0;
-
-    // 확인 다이얼로그
-    const hasSegments = this.profile.segments.length > 0;
-    const message = hasSegments
-      ? `Apply global sync (${this.formatSyncOffset(offset)}s) to all loops?\n\nThis will overwrite existing loop-specific sync settings.`
-      : `Save global sync setting (${this.formatSyncOffset(offset)}s)?`;
-
-    if (!confirm(message)) {
-      return;
+    // TAP Sync 중에는 글로벌 메트로놈 OFF
+    if (this.isGlobalMetronomeEnabled) {
+      this.isGlobalMetronomeEnabled = false;
+      this.onCommand?.('toggle-global-metronome', { enabled: false });
     }
 
-    // 모든 루프에 글로벌 싱크 적용
-    this.onCommand?.('apply-global-sync', { offset });
-  }
+    const beatsPerBar = parseInt(this.profile.timeSignature.split('/')[0], 10);
+    const bpm = this.profile.tempo;
+    const beatDuration = 60 / bpm;
 
-  /**
-   * Global Sync 메트로놈 토글 핸들러
-   */
-  private handleGlobalSyncMetronomeToggle() {
-    if (!this.profile?.tempo || !this.profile?.timeSignature) {
-      return;
+    // 현재 박자 증가 (1, 2, 3, 4, 1, 2, 3, 4, ...)
+    this.tapSyncCurrentBeat = (this.tapSyncCurrentBeat % beatsPerBar) + 1;
+
+    // 박자에 따른 소리 피드백 재생
+    this.playBeatSound(this.tapSyncCurrentBeat, beatsPerBar);
+
+    // 5초 이상 탭이 없으면 히스토리 리셋
+    const now = Date.now();
+    if (now - this.tapSyncLastResetTime > 5000 && this.tapSyncHistory.length > 0) {
+      this.tapSyncHistory = [];
+      this.tapSyncScore = 0;
     }
+    this.tapSyncLastResetTime = now;
 
-    // 상태 토글
-    this.globalSyncMetronomeEnabled = !this.globalSyncMetronomeEnabled;
+    // 현재 탭 기록 및 첫박 오프셋 계산
+    this.onCommand?.('get-current-time', {
+      callback: (currentTime: number) => {
+        // 현재 박자 번호를 기반으로 첫박 시간 역산
+        // beatNumber가 1이면 현재 시간이 첫박
+        // beatNumber가 2이면 현재 시간 - 1*beatDuration이 첫박
+        // beatNumber가 N이면 현재 시간 - (N-1)*beatDuration이 첫박
+        const beatsFromDownbeat = this.tapSyncCurrentBeat - 1;
+        const estimatedDownbeatTime = currentTime - (beatsFromDownbeat * beatDuration);
 
-    // 커맨드 전송
-    this.onCommand?.('toggle-global-sync-metronome', {
-      enabled: this.globalSyncMetronomeEnabled
+        // 첫박 오프셋 계산 (barDuration으로 모듈러)
+        const barDuration = beatDuration * beatsPerBar;
+        let calculatedOffset = estimatedDownbeatTime % barDuration;
+        if (calculatedOffset < 0) calculatedOffset += barDuration;
+
+        // 히스토리에 추가
+        this.tapSyncHistory.push({
+          beatNumber: this.tapSyncCurrentBeat,
+          tappedTime: currentTime,
+          calculatedOffset
+        });
+
+        // 최근 16개만 유지
+        if (this.tapSyncHistory.length > 16) {
+          this.tapSyncHistory.shift();
+        }
+
+        // 평균 오프셋 계산 및 점수 산출
+        if (this.tapSyncHistory.length >= 2) {
+          const { averageOffset, score } = this.calculateTapSyncResult(barDuration);
+
+          this.tapSyncScore = score;
+
+          // 글로벌 오프셋 업데이트
+          this.onCommand?.('update-global-sync', { offset: averageOffset });
+        } else if (this.tapSyncHistory.length === 1) {
+          // 첫 번째 탭은 그대로 사용
+          this.tapSyncScore = 0;
+          this.onCommand?.('update-global-sync', { offset: calculatedOffset });
+        }
+
+        // UI 업데이트
+        this.render();
+        this.setupEventListeners();
+      }
     });
+  }
+
+  /**
+   * TAP Sync 결과 계산: 평균 오프셋과 정확도 점수
+   * @param barDuration 한 마디 길이 (초)
+   * @returns { averageOffset, score }
+   */
+  private calculateTapSyncResult(barDuration: number): { averageOffset: number; score: number } {
+    if (this.tapSyncHistory.length < 2) {
+      return { averageOffset: 0, score: 0 };
+    }
+
+    const offsets = this.tapSyncHistory.map(t => t.calculatedOffset);
+
+    // 원형 평균 계산 (0과 barDuration이 인접한 값이므로)
+    // 각 오프셋을 각도로 변환하여 평균 계산
+    let sinSum = 0;
+    let cosSum = 0;
+    for (const offset of offsets) {
+      const angle = (offset / barDuration) * 2 * Math.PI;
+      sinSum += Math.sin(angle);
+      cosSum += Math.cos(angle);
+    }
+    const avgAngle = Math.atan2(sinSum / offsets.length, cosSum / offsets.length);
+    let averageOffset = (avgAngle / (2 * Math.PI)) * barDuration;
+    if (averageOffset < 0) averageOffset += barDuration;
+
+    // 표준편차 계산 (원형 거리 기준)
+    let varianceSum = 0;
+    for (const offset of offsets) {
+      // 원형 거리: 두 오프셋 간의 최소 거리
+      let diff = Math.abs(offset - averageOffset);
+      if (diff > barDuration / 2) diff = barDuration - diff;
+      varianceSum += diff * diff;
+    }
+    const stdDev = Math.sqrt(varianceSum / offsets.length);
+    const stdDevMs = stdDev * 1000; // ms로 변환
+
+    // 비선형 점수 계산 (인간 청각 인지 기반)
+    // 15ms 이하: 90-100% (매우 정밀, 프로 수준)
+    // 25ms: 80% (좋음, 인지 불가 수준)
+    // 40ms: 50% (보통, 약간 느껴짐)
+    // 60ms+: 0% (부정확, 명확히 어긋남)
+    let score: number;
+    if (stdDevMs <= 15) {
+      // 0-15ms: 90-100점 (선형)
+      score = 90 + (1 - stdDevMs / 15) * 10;
+    } else if (stdDevMs <= 25) {
+      // 15-25ms: 80-90점 (선형)
+      score = 80 + (1 - (stdDevMs - 15) / 10) * 10;
+    } else if (stdDevMs <= 40) {
+      // 25-40ms: 50-80점 (선형)
+      score = 50 + (1 - (stdDevMs - 25) / 15) * 30;
+    } else if (stdDevMs <= 60) {
+      // 40-60ms: 0-50점 (선형)
+      score = (1 - (stdDevMs - 40) / 20) * 50;
+    } else {
+      score = 0;
+    }
+
+    return { averageOffset, score: Math.round(score) };
+  }
+
+  /**
+   * 박자에 따른 소리를 재생합니다.
+   * 1박: 강한 클릭 (낮은 음), 나머지: 약한 클릭 (높은 음)
+   */
+  private playBeatSound(beat: number, _beatsPerBar: number) {
+    const isDownbeat = beat === 1;
+    this.tapSyncMetronome.playClickNow(isDownbeat);
+  }
+
+  /**
+   * 싱크 미세 조정 핸들러
+   * @param delta 조정값 (초 단위, 예: 0.01 = +10ms, -0.01 = -10ms, 0.001 = +1ms)
+   */
+  private handleSyncFineTune(delta: number) {
+    if (!this.profile) return;
+
+    const currentOffset = this.profile.globalMetronomeOffset || 0;
+    const newOffset = Math.max(0, currentOffset + delta); // 0 이상으로 제한
+
+    this.onCommand?.('update-global-sync', { offset: newOffset });
 
     // UI 업데이트
     this.render();
     this.setupEventListeners();
+  }
+
+  /**
+   * 싱크 초기화 핸들러
+   */
+  private handleSyncClear() {
+    this.tapSyncCurrentBeat = 0;
+    this.isGlobalMetronomeEnabled = false;
+
+    // TAP Sync 히스토리 초기화
+    this.tapSyncHistory = [];
+    this.tapSyncScore = 0;
+    this.tapSyncLastResetTime = 0;
+
+    this.onCommand?.('clear-global-sync', {});
+    this.onCommand?.('toggle-global-metronome', { enabled: false });
+
+    // UI 업데이트
+    this.render();
+    this.setupEventListeners();
+  }
+
+  /**
+   * 글로벌 메트로놈 토글 핸들러
+   */
+  private handleGlobalMetronomeToggle() {
+    this.isGlobalMetronomeEnabled = !this.isGlobalMetronomeEnabled;
+
+    this.onCommand?.('toggle-global-metronome', { enabled: this.isGlobalMetronomeEnabled });
+
+    // UI 업데이트
+    this.render();
+    this.setupEventListeners();
+  }
+
+  /**
+   * 메트로놈 볼륨 변경 핸들러
+   * @param volume 볼륨 (0-100)
+   */
+  private handleMetronomeVolumeChange(volume: number) {
+    this.metronomeVolume = volume;
+
+    // TAP Sync 피드백용 메트로놈 볼륨 업데이트
+    this.tapSyncMetronome.setVolume(volume / 100);
+
+    // 글로벌 메트로놈 볼륨 업데이트
+    this.onCommand?.('set-metronome-volume', { volume: volume / 100 });
   }
 
   /**
@@ -3313,6 +3739,12 @@ export class UIController {
    * UI를 정리합니다.
    */
   cleanup() {
+    // TAP Sync 메트로놈 정리
+    this.tapSyncMetronome.dispose();
+
+    // 글로벌 메트로놈 상태 초기화
+    this.isGlobalMetronomeEnabled = false;
+
     this.ui.remove();
   }
 }

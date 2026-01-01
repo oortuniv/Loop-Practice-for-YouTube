@@ -317,6 +317,31 @@ export class YouTubeLoopPractice {
         case 'toggle-global-sync-metronome':
           this.toggleGlobalSyncMetronome(data?.enabled);
           break;
+        case 'get-current-time':
+          // 현재 비디오 시간을 콜백으로 전달
+          if (this.video && data?.callback) {
+            data.callback(this.video.currentTime);
+          }
+          break;
+        case 'clear-global-sync':
+          // 글로벌 싱크 초기화
+          this.updateProfile(profile => {
+            profile.globalMetronomeOffset = undefined;
+          });
+          this.saveProfile();
+          // 메트로놈도 중지
+          this.loopController?.stopGlobalSyncMetronome();
+          break;
+        case 'toggle-global-metronome':
+          // 글로벌 메트로놈 토글
+          this.handleGlobalMetronomeToggle(data?.enabled);
+          break;
+        case 'set-metronome-volume':
+          // 메트로놈 볼륨 설정
+          if (this.loopController && typeof data?.volume === 'number') {
+            this.loopController.setMetronomeVolume(data.volume);
+          }
+          break;
         case 'reorder-segments':
           // segments 배열이 직접 전달된 경우 (UI에서 이미 재정렬됨)
           if (data?.segments) {
@@ -624,27 +649,35 @@ export class YouTubeLoopPractice {
    * 메트로놈이 활성화되면 모든 루프를 비활성화하고 일반 YouTube 재생 상태로 전환합니다.
    */
   private toggleGlobalSyncMetronome(enabled: boolean) {
+    this.handleGlobalMetronomeToggle(enabled);
+  }
+
+  /**
+   * 글로벌 메트로놈을 토글합니다.
+   * 영상 재생 중 박자에 맞춰 메트로놈 클릭음을 재생합니다.
+   */
+  private handleGlobalMetronomeToggle(enabled: boolean) {
     if (!this.loopController || !this.profile?.tempo || !this.profile?.timeSignature) {
+      console.log('[Global Metronome] 시작 실패: BPM 또는 박자표 미설정');
       return;
     }
 
-    console.log('[Global Sync Metronome] Toggle:', { enabled, video: this.video?.currentTime });
+    // globalMetronomeOffset이 설정되어 있어야 메트로놈 사용 가능
+    if (typeof this.profile.globalMetronomeOffset !== 'number') {
+      console.log('[Global Metronome] 시작 실패: Beat Sync 미설정');
+      return;
+    }
+
+    console.log('[Global Metronome] Toggle:', { enabled, videoTime: this.video?.currentTime });
 
     if (enabled) {
-      // 메트로놈 활성화: 모든 루프 비활성화
-      const wasActive = this.loopController.getActive();
-      if (wasActive) {
-        console.log('[Global Sync Metronome] Disabling active loop:', wasActive.id);
-        this.loopController.setActive(null);
-      }
-
-      // 글로벌 싱크 메트로놈 시작 (루프 없이)
+      // 메트로놈 활성화
       if (this.video && !this.video.paused) {
         this.loopController.startGlobalSyncMetronome();
       }
     } else {
       // 메트로놈 비활성화
-      console.log('[Global Sync Metronome] Stopping metronome');
+      console.log('[Global Metronome] Stopping metronome');
       this.loopController.stopGlobalSyncMetronome();
     }
   }

@@ -21,14 +21,11 @@ export class LoopController {
       this.setActive(profile.activeSegmentId);
     }
 
-    // 비디오 일시정지 시 메트로놈 중지
+    // 비디오 일시정지 시 메트로놈 중지 (플래그는 유지)
     this.video.addEventListener('pause', () => {
       if (this.metronome.isRunning()) {
-        if (this.globalSyncMetronomeActive) {
-          this.stopGlobalSyncMetronome();
-        } else {
-          this.stopMetronome();
-        }
+        // 소리만 멈추고 플래그는 유지 (재생 시 다시 시작하기 위해)
+        this.metronome.stop();
       }
     });
 
@@ -482,9 +479,20 @@ export class LoopController {
   }
 
   /**
+   * 메트로놈 볼륨 설정
+   * @param volume 볼륨 (0.0 ~ 1.0)
+   */
+  setMetronomeVolume(volume: number): void {
+    this.metronome.setVolume(volume);
+  }
+
+  /**
    * 리소스 정리
    */
   dispose(): void {
+    // 메트로놈 정지 및 리소스 정리
+    this.globalSyncMetronomeActive = false;
+    this.metronome.stop();
     this.metronome.dispose();
   }
 } 
