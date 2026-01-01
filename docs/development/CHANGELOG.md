@@ -6,6 +6,63 @@
 
 ## [Unreleased]
 
+### 2026-01-02 (Session 03 - Loop Switch Fix)
+
+#### Fixed
+- 🐛 **메트로놈 ON 상태에서 루프 전환 버그 수정**
+  - 타 루프 클릭 시 이전 루프로 점프하는 문제 해결
+  - `setProfile()`에서 `setLoopRange()` 즉시 호출
+  - 파일: `src/content/loops.ts`
+
+- 🐛 **루프 전환 후 메트로놈 무음 문제 해결**
+  - `resync()` 호출 타이밍을 video.currentTime 변경 후로 수정
+  - `resyncMetronomeIfRunning()` 메서드 추가
+  - 파일: `src/content/loops.ts`, `src/content/index.ts`
+
+#### Changed
+- 🔄 **Quantize 메뉴 조건부 표시**
+  - Beat Sync 완료 시에만 Quantize 메뉴 표시
+  - 조건: BPM + 박자표 + TAP Sync 오프셋 모두 설정 필요
+  - `isBeatSyncComplete()` 헬퍼 메서드 추가
+  - 파일: `src/content/ui-controller.ts`
+
+### 2026-01-02 (Session 02 - Double Beat Fix)
+
+#### Fixed
+- 🐛 **루프 재시작 시 더블비트 문제 해결**
+  - RAF 기반 루프 감지를 메트로놈 기반(10ms 폴링)으로 변경
+  - `resync()`에서 이미 지나간 박 스킵 로직 추가
+  - `playing` 이벤트에서 `isJumping`, `isRunning()` 체크로 중복 시작 방지
+  - 부동소수점 비교에 EPSILON(1ms) 적용
+  - 파일: `src/content/audio/metronome.ts`, `src/content/loops.ts`
+
+### 2026-01-02 (Session 01 - Loop Beat Sync & Quantize)
+
+#### Added
+- ✨ **루프 Quantize 기능**
+  - 루프 시작/끝을 가장 가까운 박에 스냅
+  - 사용법: 루프 카드 메뉴 → Quantize
+  - 파일: `src/content/index.ts`
+
+- ✨ **루프별 Beat Sync 설정**
+  - 각 루프가 독립적인 BPM, 박자표, 오프셋 설정 가능
+  - 사용법: 루프 카드 메뉴 → Beat Sync → "Use custom settings" 체크
+  - 파일: `src/content/ui-controller.ts`, `src/types.ts`
+
+- ✨ **TAP Sync 템포 정확도 점수**
+  - 일관성(70%) + 템포 정확도(30%) 가중치 적용
+  - 최소 6회 탭 전까지 "--%" 표시
+  - 파일: `src/content/ui-controller.ts`
+
+#### Changed
+- 🔄 **메트로놈 pause/resume 타이밍 정확도 향상**
+  - `play` 이벤트를 `playing` 이벤트로 변경
+  - 파일: `src/content/loops.ts`
+
+- 🔄 **메트로놈 볼륨 증가**
+  - 기본 볼륨 0.8 → 0.9, 최대 볼륨 3.0 → 4.0
+  - 파일: `src/content/audio/metronome.ts`
+
 ### 2026-01-01 (Session 03 - Custom Bars Dropdown UI)
 
 #### Changed

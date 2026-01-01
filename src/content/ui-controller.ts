@@ -2,6 +2,7 @@
 import { VideoProfile, LoopSegment } from '../types';
 import { YouTubeUI } from './ui';
 import { barsToSeconds, secondsToBars } from '../utils';
+import { Metronome } from './audio/metronome';
 
 export class UIController {
   private ui: YouTubeUI;
@@ -11,14 +12,55 @@ export class UIController {
   private isDarkTheme: boolean = false;
   private collapsedSegments: Map<string, boolean> = new Map(); // 세그먼트별 접힌 상태 저장
   private draggedSegmentId: string | null = null; // 드래그 중인 세그먼트 ID
-  private globalSyncMetronomeEnabled: boolean = false; // 글로벌 싱크 메트로놈 상태
   private lastClickTime: Map<string, number> = new Map(); // 더블클릭 감지용 마지막 클릭 시간
   private openBarsDropdownId: string | null = null; // 현재 열린 bars 드롭다운 ID
+
+  // Tap Sync 관련 상태
+  private tapSyncCurrentBeat: number = 0; // 현재 박자 (1, 2, 3, 4... 0이면 초기 상태)
+  private tapSyncMetronome: Metronome = new Metronome(); // TAP 피드백용 메트로놈
+  private isGlobalMetronomeEnabled: boolean = false; // 글로벌 메트로놈 활성화 상태
+  private metronomeVolume: number = 80; // 메트로놈 볼륨 (0-100)
+
+  // TAP Sync 정밀도 향상을 위한 탭 기록
+  // { beatNumber: 1-4, tappedTime: video.currentTime, calculatedOffset: 첫박 기준 오프셋 }
+  private tapSyncHistory: Array<{ beatNumber: number; tappedTime: number; calculatedOffset: number }> = [];
+  private tapSyncScore: number = 0; // 0-100 점수
+  private tapSyncLastResetTime: number = 0; // 마지막 리셋 시간
+
+  // 점수를 표시하기 위한 최소 탭 수 (표본이 적으면 점수 신뢰도가 낮음)
+  private readonly TAP_SYNC_MIN_SAMPLES = 6;
+
+  // Beat Sync 모달 관련 상태
+  private localTapSyncCurrentBeat: number = 0; // 로컬 TAP Sync 현재 박자
+  private localTapSyncHistory: Array<{ beatNumber: number; tappedTime: number; calculatedOffset: number }> = [];
+  private localTapSyncScore: number = 0;
+  private localTapSyncLastResetTime: number = 0;
 
   constructor() {
     this.ui = new YouTubeUI();
     this.detectTheme();
     this.observeThemeChanges();
+  }
+
+  /**
+   * 세그먼트의 Beat Sync가 완료되었는지 확인합니다.
+   * BPM, 박자표, 오프셋(TAP Sync)이 모두 설정되어 있어야 true를 반환합니다.
+   */
+  private isBeatSyncComplete(segment: LoopSegment): boolean {
+    // 로컬 설정 사용 시
+    if (segment.useGlobalSync === false) {
+      const hasLocalTempo = typeof segment.localTempo === 'number' && segment.localTempo > 0;
+      const hasLocalTimeSignature = typeof segment.localTimeSignature === 'string' && segment.localTimeSignature.length > 0;
+      const hasLocalOffset = typeof segment.localMetronomeOffset === 'number';
+      return hasLocalTempo && hasLocalTimeSignature && hasLocalOffset;
+    }
+
+    // 글로벌 설정 사용 시
+    if (!this.profile) return false;
+    const hasGlobalTempo = typeof this.profile.tempo === 'number' && this.profile.tempo > 0;
+    const hasGlobalTimeSignature = typeof this.profile.timeSignature === 'string' && this.profile.timeSignature.length > 0;
+    const hasGlobalOffset = typeof this.profile.globalMetronomeOffset === 'number';
+    return hasGlobalTempo && hasGlobalTimeSignature && hasGlobalOffset;
   }
 
   /**
@@ -114,10 +156,17 @@ export class UIController {
   }
 
   /**
-   * 글로벌 싱크 메트로놈이 활성화되어 있는지 확인합니다.
+   * 세그먼트가 유효한 Beat Sync 설정을 가지고 있는지 확인합니다.
+   * (글로벌 또는 로컬 설정이 있으면 true)
    */
-  private isGlobalSyncMetronomeActive(): boolean {
-    return this.globalSyncMetronomeEnabled;
+  private hasEffectiveSync(segment: LoopSegment): boolean {
+    if (segment.useGlobalSync !== false) {
+      // 글로벌 설정 사용
+      return !!(this.profile?.tempo && this.profile?.timeSignature);
+    } else {
+      // 로컬 설정 사용
+      return !!(segment.localTempo && segment.localTimeSignature);
+    }
   }
 
   /**
@@ -145,13 +194,6 @@ export class UIController {
 
     // 메트로놈 사용 가능한 상태
     return 'Toggle metronome click sound';
-  }
-
-  /**
-   * 싱크 오프셋을 포맷팅합니다 (xx.xxx 형식).
-   */
-  private formatSyncOffset(offset: number): string {
-    return offset.toFixed(3);
   }
 
   /**
@@ -211,6 +253,9 @@ export class UIController {
           <div class="loop-count">${this.profile.segments.length} loops</div>
         </div>
 
+        <!-- Beat Navigation & Metronome Control -->
+        ${this.getBeatNavigationHTML()}
+
         <div class="panel-content" style="display: ${this.isCollapsed ? 'none' : 'block'}">
           <!-- Video Info Card -->
           <div class="video-info-section">
@@ -222,7 +267,7 @@ export class UIController {
             <div class="global-settings">
               <div class="settings-row">
                 <div class="setting-group">
-                  <label>Tempo (BPM)ㄴ</label>
+                  <label>Tempo (BPM)</label>
                   <div class="tempo-controls">
                     <input type="text" id="tempoInput" class="tempo-input" value="${tempo || '---'}" data-placeholder="---">
                     <button class="btn btn-small btn-tap" id="tapTempo">TAP</button>
@@ -247,79 +292,174 @@ export class UIController {
                 </div>
               </div>
 
-              <!-- Global Sync 기능 임시 숨김 (로직은 유지) -->
-              <!--
-              <div class="setting-group global-sync-group" style="display: none;">
-                <label>Global Sync:</label>
-                <div class="sync-controls">
-                  <button
-                    class="btn-metronome ${this.isGlobalSyncMetronomeActive() ? 'active' : ''}"
-                    id="globalSyncMetronome"
-                    ${!tempo || !timeSignature ? 'disabled' : ''}
-                    title="Toggle metronome for global sync adjustment"
-                  >
-                    ♪
-                  </button>
-                  <input
-                    type="text"
-                    id="globalSyncInput"
-                    class="sync-input"
-                    value="${this.formatSyncOffset(this.profile.globalMetronomeOffset || 0)}"
-                    ${!tempo || !timeSignature ? 'disabled' : ''}
-                  >
-                  <span class="sync-unit">s</span>
-                  <button
-                    class="btn btn-small btn-sync"
-                    id="syncGlobal"
-                    ${!tempo || !timeSignature ? 'disabled' : ''}
-                    title="Apply global sync to all loops"
-                  >
-                    SYNC
-                  </button>
-                </div>
-              </div>
-              -->
+              <!-- Tap Sync -->
+              ${this.getTapSyncHTML(tempo, timeSignature)}
             </div>
           </div>
 
-          <!-- Loop Management Card -->
-          <div class="controls-section">
-            <div class="control-group">
-              <label>Loop Management</label>
-              <div class="segment-management">
-                <div class="label-input-wrapper">
-                  <input
-                    type="text"
-                    id="segmentLabel"
-                    class="segment-input label-input"
-                    placeholder="Loop name..."
-                    autocomplete="off"
-                  />
-                  <button type="button" class="label-dropdown-toggle" id="labelDropdownToggle">
-                    <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-                      <path d="M7 10l5 5 5-5z"/>
-                    </svg>
-                  </button>
-                  <div class="label-dropdown" id="labelDropdown" style="display: none;">
-                    <div class="label-option" data-value="Intro">Intro</div>
-                    <div class="label-option" data-value="Verse">Verse</div>
-                    <div class="label-option" data-value="Pre Chorus">Pre Chorus</div>
-                    <div class="label-option" data-value="Chorus">Chorus</div>
-                    <div class="label-option" data-value="Interlude">Interlude</div>
-                    <div class="label-option" data-value="Bridge">Bridge</div>
-                    <div class="label-option" data-value="Outro">Outro</div>
-                  </div>
-                </div>
-                ${this.getCustomBarsDropdownHTML('loopDuration', 'bar:8', 'duration')}
-                <button class="btn btn-small btn-primary" id="createSegment">Create</button>
+          <!-- Loop Management (Compact) -->
+          <div class="loop-create-bar">
+            <div class="label-input-wrapper">
+              <input
+                type="text"
+                id="segmentLabel"
+                class="segment-input label-input"
+                placeholder="Loop name..."
+                autocomplete="off"
+              />
+              <button type="button" class="label-dropdown-toggle" id="labelDropdownToggle">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                  <path d="M7 10l5 5 5-5z"/>
+                </svg>
+              </button>
+              <div class="label-dropdown" id="labelDropdown" style="display: none;">
+                <div class="label-option" data-value="Intro">Intro</div>
+                <div class="label-option" data-value="Verse">Verse</div>
+                <div class="label-option" data-value="Pre Chorus">Pre Chorus</div>
+                <div class="label-option" data-value="Chorus">Chorus</div>
+                <div class="label-option" data-value="Interlude">Interlude</div>
+                <div class="label-option" data-value="Bridge">Bridge</div>
+                <div class="label-option" data-value="Outro">Outro</div>
               </div>
             </div>
+            ${this.getCustomBarsDropdownHTML('loopDuration', 'bar:8', 'duration')}
+            <button class="btn btn-small btn-primary" id="createSegment">+</button>
           </div>
 
           <div class="segments-list" id="segmentsList">
             ${segmentsHTML || '<div class="no-loops">No loops yet. Create one!</div>'}
           </div>
         </div>
+      </div>
+    `;
+  }
+
+  /**
+   * Tap Sync UI HTML을 생성합니다.
+   */
+  private getTapSyncHTML(tempo: number | undefined, timeSignature: string | undefined): string {
+    const isEnabled = tempo && timeSignature;
+    const beatsPerBar = timeSignature ? parseInt(timeSignature.split('/')[0], 10) : 4;
+    const firstBeatTime = this.profile?.globalMetronomeOffset;
+    const hasFirstBeat = typeof firstBeatTime === 'number';
+
+    // 현재 박자 표시 (1, 2, 3, 4 중 하나)
+    const currentBeatDisplay = this.tapSyncCurrentBeat > 0
+      ? `${this.tapSyncCurrentBeat}/${beatsPerBar}`
+      : 'TAP';
+
+    // 점수에 따른 색상 (신호등 색깔)
+    const tapCount = this.tapSyncHistory.length;
+    const hasEnoughSamples = tapCount >= this.TAP_SYNC_MIN_SAMPLES;
+    const scoreColor = hasEnoughSamples ? this.getScoreColor(this.tapSyncScore) : '#888';
+    const scoreText = hasEnoughSamples ? `${this.tapSyncScore}%` : '--%';
+    const scoreBgColor = hasEnoughSamples ? this.getScoreBgColor(this.tapSyncScore) : (this.isDarkTheme ? '#2a2a2a' : '#f0f0f0');
+
+    return `
+      <div class="setting-group tap-sync-group" ${!isEnabled ? 'style="display: none;"' : ''}>
+        <label>Beat Sync <span class="sync-hint">(wired headphones recommended)</span></label>
+        <div class="tap-sync-controls">
+          <div class="tap-sync-row">
+            <button
+              class="btn btn-tap-sync ${this.tapSyncCurrentBeat > 0 ? 'tapped' : ''}"
+              id="tapSyncBtn"
+              title="Tap along with the beat. Each tap refines the sync accuracy."
+            >
+              ${currentBeatDisplay}
+            </button>
+            <div class="sync-result-box ${hasFirstBeat ? 'has-result' : ''}" style="background: ${scoreBgColor}; border-color: ${hasFirstBeat ? scoreColor : 'transparent'};" title="${hasFirstBeat ? `Accuracy: ${scoreText} (${tapCount} taps)` : 'Tap to sync'}">
+              <div class="sync-score" style="color: ${scoreColor};">
+                <span class="score-label">Sync:</span>
+                <span class="score-value">${scoreText}</span>
+              </div>
+              ${hasFirstBeat ? `
+                <div class="sync-time">
+                  <span class="time-value">${this.formatSyncTime(firstBeatTime)}</span>
+                  <button class="btn-sync-clear-inline" id="syncClear" title="Clear sync">✕</button>
+                </div>
+              ` : `
+                <div class="sync-time placeholder">
+                  <span class="time-value">--:---.---</span>
+                </div>
+              `}
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  /**
+   * 점수에 따른 배경색 반환
+   */
+  private getScoreBgColor(score: number): string {
+    if (score >= 80) return this.isDarkTheme ? '#1a3a1a' : '#e8f5e9'; // 초록 배경
+    if (score >= 50) return this.isDarkTheme ? '#3a3020' : '#fff3e0'; // 주황 배경
+    return this.isDarkTheme ? '#3a1a1a' : '#ffebee'; // 빨강 배경
+  }
+
+  /**
+   * 점수에 따른 색상 반환 (신호등 색깔)
+   */
+  private getScoreColor(score: number): string {
+    if (score >= 80) return '#4caf50'; // 초록 (좋음)
+    if (score >= 50) return '#ff9800'; // 주황 (보통)
+    return '#f44336'; // 빨강 (나쁨)
+  }
+
+  /**
+   * 싱크 시간을 포맷팅합니다 (m:ss.xxx 형식).
+   */
+  private formatSyncTime(seconds: number): string {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toFixed(3).padStart(6, '0')}`;
+  }
+
+  /**
+   * Beat Navigation + Metronome Control HTML을 생성합니다.
+   * 비트 네비게이션은 항상 표시되고, 그 아래에 메트로놈 컨트롤이 콤팩트하게 배치됩니다.
+   */
+  private getBeatNavigationHTML(): string {
+    const hasFirstBeat = typeof this.profile?.globalMetronomeOffset === 'number';
+    const beatsPerBar = this.profile?.timeSignature
+      ? parseInt(this.profile.timeSignature.split('/')[0], 10)
+      : 4;
+
+    // 박자 수에 맞는 비트 표시 생성
+    const beatSpans = Array.from({ length: beatsPerBar }, (_, i) =>
+      `<span class="count-beat" data-beat="${i + 1}">${i + 1}</span>`
+    ).join('');
+
+    return `
+      <div class="beat-nav-section ${hasFirstBeat ? 'has-sync' : ''}">
+        <div class="count-in-display" id="countInDisplay">
+          ${beatSpans}
+        </div>
+        ${hasFirstBeat ? `
+          <div class="metronome-control-row">
+            <button
+              class="btn btn-metronome-compact ${this.isGlobalMetronomeEnabled ? 'active' : ''}"
+              id="globalMetronomeToggle"
+              title="Toggle metronome"
+            >
+              <span class="metronome-icon">♪</span>
+              <span class="metronome-status">${this.isGlobalMetronomeEnabled ? 'ON' : 'OFF'}</span>
+            </button>
+            <div class="volume-control-compact">
+              <span class="volume-icon-small">🔊</span>
+              <input
+                type="range"
+                id="metronomeVolume"
+                class="volume-slider-compact"
+                min="0"
+                max="100"
+                value="${this.metronomeVolume}"
+                title="Volume: ${this.metronomeVolume}%"
+              />
+            </div>
+          </div>
+        ` : ''}
       </div>
     `;
   }
@@ -372,6 +512,8 @@ export class UIController {
             </button>
             <div class="menu-dropdown" data-segment-id="${segment.id}" style="display: none;">
               <button class="menu-item" data-segment-id="${segment.id}" data-action="duplicate">Duplicate</button>
+              <button class="menu-item" data-segment-id="${segment.id}" data-action="open-beat-sync">Beat Sync</button>
+              ${this.isBeatSyncComplete(segment) ? `<button class="menu-item" data-segment-id="${segment.id}" data-action="quantize">Quantize</button>` : ''}
               <button class="menu-item menu-delete" data-segment-id="${segment.id}" data-action="delete">Delete</button>
             </div>
           </div>
@@ -413,10 +555,17 @@ export class UIController {
           <div class="segment-actions">
             <div class="action-buttons-vertical">
               <button class="btn btn-loop ${isActive ? 'active' : ''}" data-segment-id="${segment.id}" data-action="jump-and-activate" title="Activate loop">
-                <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
                   <path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/>
                 </svg>
               </button>
+              <!-- 카운트인 버튼 임시 숨김 (로직은 유지) -->
+              <!--
+              <button class="btn btn-count-in ${segment.countInEnabled ? 'active' : ''}" data-segment-id="${segment.id}" data-action="toggle-count-in" title="Count-in (1 bar before loop)"
+                      ${!this.hasEffectiveSync(segment) ? 'disabled' : ''}>
+                <span class="count-in-label">1234</span>
+              </button>
+              -->
               <!-- 메트로놈 버튼 임시 숨김 (로직은 유지) -->
               <!--
               <button class="btn btn-metronome ${this.isMetronomeActive(segment.id) ? 'active' : ''}"
@@ -725,6 +874,365 @@ export class UIController {
         cursor: not-allowed;
       }
 
+      /* Tap Sync 스타일 */
+      .tap-sync-group {
+        margin-top: 12px;
+        padding-top: 12px;
+        border-top: 1px solid ${borderColor};
+      }
+
+      .sync-hint {
+        font-size: 10px;
+        font-weight: 400;
+        color: ${textSecondary};
+        opacity: 0.8;
+      }
+
+      .tap-sync-controls {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .tap-sync-row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+
+      .btn-tap-sync {
+        flex: 0 0 auto;
+        min-width: 80px;
+        padding: 8px 12px;
+        background: ${this.isDarkTheme ? '#3f3f3f' : '#e0e0e0'};
+        color: ${textPrimary};
+        border: 1px solid ${inputBorder};
+        border-radius: 4px;
+        font-size: 13px;
+        font-weight: 600;
+        font-family: 'Roboto Mono', monospace;
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+
+      .btn-tap-sync:hover {
+        background: ${this.isDarkTheme ? '#505050' : '#d0d0d0'};
+      }
+
+      .btn-tap-sync:active {
+        background: #065fd4;
+        color: white;
+        transform: scale(0.98);
+      }
+
+      .btn-tap-sync.tapped {
+        background: ${this.isDarkTheme ? '#1a3a1a' : '#e8f5e9'};
+        border-color: #4caf50;
+        color: ${this.isDarkTheme ? '#81c784' : '#2e7d32'};
+      }
+
+      .tap-sync-hint {
+        font-size: 11px;
+        color: ${textSecondary};
+        opacity: 0.8;
+      }
+
+      /* Sync Result Box (compact single-line) */
+      .sync-result-box {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 6px 10px;
+        border-radius: 4px;
+        border: 1px solid transparent;
+        transition: all 0.15s ease;
+      }
+
+      .sync-result-box.has-result {
+        border-width: 1px;
+        border-style: solid;
+      }
+
+      .sync-score {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 12px;
+      }
+
+      .sync-score .score-label {
+        font-weight: 400;
+        opacity: 0.8;
+      }
+
+      .sync-score .score-value {
+        font-weight: 600;
+        font-family: 'Roboto Mono', monospace;
+      }
+
+      .sync-time {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .sync-time .time-value {
+        font-size: 12px;
+        font-weight: 500;
+        font-family: 'Roboto Mono', monospace;
+        color: ${textPrimary};
+      }
+
+      .sync-time.placeholder .time-value {
+        color: ${textSecondary};
+        opacity: 0.5;
+      }
+
+      .btn-sync-clear-inline {
+        padding: 2px 6px;
+        background: transparent;
+        color: ${textSecondary};
+        border: none;
+        border-radius: 3px;
+        font-size: 11px;
+        cursor: pointer;
+        opacity: 0.6;
+        transition: all 0.15s ease;
+      }
+
+      .btn-sync-clear-inline:hover {
+        background: ${this.isDarkTheme ? 'rgba(244, 67, 54, 0.2)' : 'rgba(244, 67, 54, 0.1)'};
+        color: #f44336;
+        opacity: 1;
+      }
+
+      /* Beat Navigation Section */
+      .beat-nav-section {
+        padding: 8px 16px;
+        background: ${this.isDarkTheme ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.03)'};
+        border-bottom: 1px solid ${borderColor};
+      }
+
+      .beat-nav-section:not(.has-sync) .count-in-display {
+        opacity: 0.4;
+      }
+
+      /* Metronome Control Row (compact) */
+      .metronome-control-row {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        margin-top: 6px;
+      }
+
+      .btn-metronome-compact {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 4px 10px;
+        background: ${this.isDarkTheme ? '#3f3f3f' : '#e8e8e8'};
+        color: ${textPrimary};
+        border: 1px solid ${inputBorder};
+        border-radius: 4px;
+        font-size: 12px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+
+      .btn-metronome-compact:hover {
+        background: ${this.isDarkTheme ? '#505050' : '#d8d8d8'};
+      }
+
+      .btn-metronome-compact.active {
+        background: ${this.isDarkTheme ? '#3d3020' : '#f5f0e8'};
+        border-color: #8B6F47;
+        color: ${this.isDarkTheme ? '#d4a574' : '#6b5330'};
+      }
+
+      .btn-metronome-compact .metronome-icon {
+        font-size: 14px;
+      }
+
+      .btn-metronome-compact .metronome-status {
+        font-weight: 600;
+      }
+
+      .volume-control-compact {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+
+      .volume-icon-small {
+        font-size: 12px;
+        opacity: 0.7;
+      }
+
+      .volume-slider-compact {
+        width: 50px;
+        height: 3px;
+        -webkit-appearance: none;
+        appearance: none;
+        background: ${this.isDarkTheme ? '#555' : '#ccc'};
+        border-radius: 2px;
+        outline: none;
+        cursor: pointer;
+      }
+
+      .volume-slider-compact::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        appearance: none;
+        width: 10px;
+        height: 10px;
+        background: #8B6F47;
+        border-radius: 50%;
+        cursor: pointer;
+      }
+
+      .volume-slider-compact::-moz-range-thumb {
+        width: 10px;
+        height: 10px;
+        background: #8B6F47;
+        border-radius: 50%;
+        cursor: pointer;
+        border: none;
+      }
+
+      /* Legacy styles (kept for compatibility) */
+      .metronome-toggle-row {
+        margin-top: 8px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .btn-metronome-toggle {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex: 1;
+        padding: 10px 12px;
+        background: ${this.isDarkTheme ? '#3f3f3f' : '#e8e8e8'};
+        color: ${textPrimary};
+        border: 1px solid ${inputBorder};
+        border-radius: 4px;
+        font-size: 13px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+
+      .btn-metronome-toggle:hover {
+        background: ${this.isDarkTheme ? '#505050' : '#d8d8d8'};
+      }
+
+      .btn-metronome-toggle.active {
+        background: ${this.isDarkTheme ? '#3d3020' : '#f5f0e8'};
+        border-color: #8B6F47;
+        color: ${this.isDarkTheme ? '#d4a574' : '#6b5330'};
+      }
+
+      .btn-metronome-toggle.active:hover {
+        background: ${this.isDarkTheme ? '#4a3a28' : '#ebe5d8'};
+      }
+
+      .metronome-icon {
+        font-size: 16px;
+      }
+
+      .metronome-label {
+        flex: 1;
+        text-align: left;
+      }
+
+      .metronome-volume-control {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 6px 8px;
+        background: ${this.isDarkTheme ? '#3f3f3f' : '#e8e8e8'};
+        border: 1px solid ${inputBorder};
+        border-radius: 4px;
+      }
+
+      .volume-icon {
+        font-size: 14px;
+        opacity: 0.8;
+      }
+
+      .volume-slider {
+        width: 60px;
+        height: 4px;
+        -webkit-appearance: none;
+        appearance: none;
+        background: ${this.isDarkTheme ? '#555' : '#ccc'};
+        border-radius: 2px;
+        outline: none;
+        cursor: pointer;
+      }
+
+      .volume-slider::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        appearance: none;
+        width: 12px;
+        height: 12px;
+        background: #8B6F47;
+        border-radius: 50%;
+        cursor: pointer;
+      }
+
+      .volume-slider::-moz-range-thumb {
+        width: 12px;
+        height: 12px;
+        background: #8B6F47;
+        border-radius: 50%;
+        cursor: pointer;
+        border: none;
+      }
+
+      /* Loop Create Bar (compact) */
+      .loop-create-bar {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        padding: 8px 16px;
+        background: ${bgSecondary};
+        border-bottom: 1px solid ${borderColor};
+      }
+
+      .loop-create-bar .label-input-wrapper {
+        flex: 1;
+      }
+
+      .loop-create-bar .label-input {
+        width: 100%;
+        padding: 6px 28px 6px 10px;
+        font-size: 12px;
+      }
+
+      .loop-create-bar .custom-bars-dropdown {
+        flex: 0 0 70px;
+      }
+
+      .loop-create-bar .custom-bars-dropdown .bars-dropdown-trigger {
+        padding: 6px 8px;
+        font-size: 12px;
+      }
+
+      .loop-create-bar #createSegment {
+        flex: 0 0 32px;
+        width: 32px;
+        height: 32px;
+        padding: 0;
+        font-size: 18px;
+        font-weight: 600;
+        border-radius: 4px;
+      }
+
+      /* Legacy styles (kept for compatibility) */
       .controls-section {
         background: ${bgSecondary};
         border-radius: 8px;
@@ -822,10 +1330,10 @@ export class UIController {
         display: flex;
         align-items: center;
         justify-content: center;
-        padding: 12px;
+        padding: 8px;
         border-radius: 8px;
         width: 100%;
-        height: 100%;
+        flex: 1;
         min-width: 48px;
       }
 
@@ -843,8 +1351,80 @@ export class UIController {
         display: block;
       }
 
+      .btn-count-in {
+        background: ${this.isDarkTheme ? '#3f3f3f' : '#f9f9f9'};
+        color: ${textSecondary};
+        border: 1px solid ${borderColor};
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 6px;
+        border-radius: 6px;
+        width: 100%;
+        min-width: 48px;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 1px;
+      }
+
+      .btn-count-in:hover:not(:disabled) {
+        background: ${this.isDarkTheme ? '#4f4f4f' : '#f2f2f2'};
+      }
+
+      .btn-count-in:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+
+      .btn-count-in.active {
+        background: ${this.isDarkTheme ? '#4a3a6b' : '#ede7f6'};
+        color: ${this.isDarkTheme ? '#ce93d8' : '#7b1fa2'};
+        border-color: #9c27b0;
+      }
+
+      .btn-count-in .count-in-label {
+        font-family: 'Roboto Mono', monospace;
+      }
+
+      /* Count-In Display (Beat Navigation) */
+      .count-in-display {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: 12px;
+        padding: 8px 0;
+      }
+
+      .count-beat {
+        font-size: 22px;
+        font-weight: 700;
+        color: ${textSecondary};
+        opacity: 0.4;
+        transition: all 0.1s ease;
+        font-family: 'Roboto Mono', monospace;
+        width: 32px;
+        height: 32px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 50%;
+      }
+
+      .count-beat.active {
+        color: ${this.isDarkTheme ? '#ce93d8' : '#7b1fa2'};
+        opacity: 1;
+        transform: scale(1.2);
+        background: ${this.isDarkTheme ? '#4a3a6b' : '#ede7f6'};
+      }
+
+      /* Metronome mode (wood tone) */
+      .count-in-display.metronome-mode .count-beat.active {
+        color: ${this.isDarkTheme ? '#d4a574' : '#8b5a2b'};
+        background: ${this.isDarkTheme ? '#4a3928' : '#f5e6d3'};
+      }
+
       .segments-list {
-        max-height: 400px;
+        max-height: 500px;
         overflow-y: auto;
         background: transparent;
         border-radius: 8px;
@@ -1674,24 +2254,60 @@ export class UIController {
       timeSignatureSelect.addEventListener('change', (e) => this.handleTimeSignatureChange(e as Event));
     }
 
-    // Global Sync 입력
-    const globalSyncInput = this.ui.querySelector<HTMLInputElement>('#globalSyncInput');
-    if (globalSyncInput) {
-      this.preventYouTubeShortcuts(globalSyncInput);
-      globalSyncInput.addEventListener('change', (e) => this.handleGlobalSyncChange(e as Event));
-      globalSyncInput.addEventListener('mousedown', (e) => this.handleGlobalSyncInputMouseDown(e as MouseEvent));
+    // Tap Sync 버튼 - mousedown 사용으로 레이턴시 최소화
+    const tapSyncBtn = this.ui.querySelector('#tapSyncBtn');
+    if (tapSyncBtn) {
+      // mousedown은 click보다 빠름 (click은 mouseup 후 발생)
+      tapSyncBtn.addEventListener('mousedown', (e) => {
+        e.preventDefault(); // 텍스트 선택 방지
+        this.handleTapSync();
+      });
+      // 마우스 올릴 때 AudioContext 워밍업 (첫 클릭 레이턴시 감소)
+      tapSyncBtn.addEventListener('mouseenter', () => {
+        this.tapSyncMetronome.warmup();
+      });
     }
 
-    // Global Sync 버튼
-    const syncGlobalBtn = this.ui.querySelector('#syncGlobal');
-    if (syncGlobalBtn) {
-      syncGlobalBtn.addEventListener('click', () => this.handleSyncGlobal());
+    // 미세 조정 버튼들
+    const syncMinus1 = this.ui.querySelector('#syncMinus1');
+    if (syncMinus1) {
+      syncMinus1.addEventListener('click', () => this.handleSyncFineTune(-0.001));
     }
 
-    // Global Sync 메트로놈 버튼
-    const globalSyncMetronomeBtn = this.ui.querySelector('#globalSyncMetronome');
-    if (globalSyncMetronomeBtn) {
-      globalSyncMetronomeBtn.addEventListener('click', () => this.handleGlobalSyncMetronomeToggle());
+    const syncMinus10 = this.ui.querySelector('#syncMinus10');
+    if (syncMinus10) {
+      syncMinus10.addEventListener('click', () => this.handleSyncFineTune(-0.01));
+    }
+
+    const syncPlus10 = this.ui.querySelector('#syncPlus10');
+    if (syncPlus10) {
+      syncPlus10.addEventListener('click', () => this.handleSyncFineTune(0.01));
+    }
+
+    const syncPlus1 = this.ui.querySelector('#syncPlus1');
+    if (syncPlus1) {
+      syncPlus1.addEventListener('click', () => this.handleSyncFineTune(0.001));
+    }
+
+    // 싱크 초기화 버튼
+    const syncClear = this.ui.querySelector('#syncClear');
+    if (syncClear) {
+      syncClear.addEventListener('click', () => this.handleSyncClear());
+    }
+
+    // 글로벌 메트로놈 토글 버튼
+    const globalMetronomeToggle = this.ui.querySelector('#globalMetronomeToggle');
+    if (globalMetronomeToggle) {
+      globalMetronomeToggle.addEventListener('click', () => this.handleGlobalMetronomeToggle());
+    }
+
+    // 메트로놈 볼륨 슬라이더
+    const volumeSlider = this.ui.querySelector('#metronomeVolume') as HTMLInputElement;
+    if (volumeSlider) {
+      volumeSlider.addEventListener('input', (e) => {
+        const value = parseInt((e.target as HTMLInputElement).value, 10);
+        this.handleMetronomeVolumeChange(value);
+      });
     }
 
     // 세그먼트 관련 이벤트 (이벤트 위임 사용)
@@ -1841,6 +2457,16 @@ export class UIController {
         this.closeAllMenus();
         this.onCommand?.('duplicate-segment', { segmentId });
         break;
+      case 'quantize':
+        console.log('quantize 액션 실행');
+        this.closeAllMenus();
+        this.onCommand?.('quantize-segment', { segmentId });
+        break;
+      case 'open-beat-sync':
+        console.log('open-beat-sync 액션 실행');
+        this.closeAllMenus();
+        this.openBeatSyncModal(segmentId);
+        break;
       case 'toggle-menu':
         console.log('toggle-menu 액션 실행');
         this.toggleMenu(segmentId);
@@ -1876,6 +2502,10 @@ export class UIController {
       case 'add-8-bars':
         console.log('add-8-bars 액션 실행');
         this.onCommand?.('add-8-bars', { segmentId });
+        break;
+      case 'toggle-count-in':
+        console.log('toggle-count-in 액션 실행');
+        this.onCommand?.('toggle-count-in', { segmentId });
         break;
       default:
         console.warn('알 수 없는 액션:', action);
@@ -2811,116 +3441,259 @@ export class UIController {
   }
 
   /**
-   * Global Sync 입력 변경 핸들러
+   * Tap Sync 버튼 클릭 핸들러
+   * 모든 박자의 탭을 수집하여 첫박 오프셋을 정밀하게 계산합니다.
+   * 탭이 누적될수록 평균값이 더 정확해지고, 점수가 표시됩니다.
    */
-  private handleGlobalSyncChange(e: Event) {
-    const input = e.target as HTMLInputElement;
-    const value = parseFloat(input.value);
-
-    if (isNaN(value)) {
-      input.value = this.formatSyncOffset(this.profile?.globalMetronomeOffset || 0);
-      return;
-    }
-
-    // -999.999 ~ 999.999 범위로 제한
-    const clampedValue = Math.max(-999.999, Math.min(999.999, value));
-    input.value = this.formatSyncOffset(clampedValue);
-
-    this.onCommand?.('update-global-sync', { offset: clampedValue });
-  }
-
-  /**
-   * Global Sync 입력 마우스다운 핸들러 (드래그로 값 조정)
-   */
-  private handleGlobalSyncInputMouseDown(e: MouseEvent) {
-    const input = e.target as HTMLInputElement;
-    const startY = e.clientY;
-    const startValue = parseFloat(input.value) || 0;
-
-    let isDragging = false;
-    const dragThreshold = 3;
-    let lastValue = startValue;
-
-    const handleMouseMove = (moveEvent: MouseEvent) => {
-      const deltaY = startY - moveEvent.clientY;
-
-      if (!isDragging && Math.abs(deltaY) < dragThreshold) {
-        return;
-      }
-
-      isDragging = true;
-      input.style.cursor = 'ns-resize';
-
-      // 1px = 0.001s
-      const newValue = startValue + (deltaY * 0.001);
-      const clampedValue = Math.max(-999.999, Math.min(999.999, newValue));
-
-      input.value = this.formatSyncOffset(clampedValue);
-      lastValue = clampedValue;
-
-      // 실시간 업데이트 (저장하지 않고 메트로놈만 업데이트)
-      this.onCommand?.('update-global-sync-realtime', { offset: clampedValue });
-    };
-
-    const handleMouseUp = () => {
-      document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseup', handleMouseUp);
-      input.style.cursor = 'ns-resize';
-
-      if (isDragging) {
-        e.preventDefault();
-        // 드래그 종료 시 최종 값 저장
-        this.onCommand?.('update-global-sync', { offset: lastValue });
-      }
-    };
-
-    document.addEventListener('mousemove', handleMouseMove);
-    document.addEventListener('mouseup', handleMouseUp);
-  }
-
-  /**
-   * Global Sync 버튼 클릭 핸들러 (모든 루프에 싱크 적용)
-   */
-  private handleSyncGlobal() {
+  private handleTapSync() {
     if (!this.profile?.tempo || !this.profile?.timeSignature) {
       return;
     }
 
-    const offset = this.profile.globalMetronomeOffset || 0;
-
-    // 확인 다이얼로그
-    const hasSegments = this.profile.segments.length > 0;
-    const message = hasSegments
-      ? `Apply global sync (${this.formatSyncOffset(offset)}s) to all loops?\n\nThis will overwrite existing loop-specific sync settings.`
-      : `Save global sync setting (${this.formatSyncOffset(offset)}s)?`;
-
-    if (!confirm(message)) {
-      return;
+    // TAP Sync 중에는 글로벌 메트로놈 OFF
+    if (this.isGlobalMetronomeEnabled) {
+      this.isGlobalMetronomeEnabled = false;
+      this.onCommand?.('toggle-global-metronome', { enabled: false });
     }
 
-    // 모든 루프에 글로벌 싱크 적용
-    this.onCommand?.('apply-global-sync', { offset });
-  }
+    const beatsPerBar = parseInt(this.profile.timeSignature.split('/')[0], 10);
+    const bpm = this.profile.tempo;
+    const beatDuration = 60 / bpm;
 
-  /**
-   * Global Sync 메트로놈 토글 핸들러
-   */
-  private handleGlobalSyncMetronomeToggle() {
-    if (!this.profile?.tempo || !this.profile?.timeSignature) {
-      return;
+    // 현재 박자 증가 (1, 2, 3, 4, 1, 2, 3, 4, ...)
+    this.tapSyncCurrentBeat = (this.tapSyncCurrentBeat % beatsPerBar) + 1;
+
+    // 박자에 따른 소리 피드백 재생
+    this.playBeatSound(this.tapSyncCurrentBeat, beatsPerBar);
+
+    // 5초 이상 탭이 없으면 히스토리 리셋
+    const now = Date.now();
+    if (now - this.tapSyncLastResetTime > 5000 && this.tapSyncHistory.length > 0) {
+      this.tapSyncHistory = [];
+      this.tapSyncScore = 0;
     }
+    this.tapSyncLastResetTime = now;
 
-    // 상태 토글
-    this.globalSyncMetronomeEnabled = !this.globalSyncMetronomeEnabled;
+    // 현재 탭 기록 및 첫박 오프셋 계산
+    this.onCommand?.('get-current-time', {
+      callback: (currentTime: number) => {
+        // 현재 박자 번호를 기반으로 첫박 시간 역산
+        // beatNumber가 1이면 현재 시간이 첫박
+        // beatNumber가 2이면 현재 시간 - 1*beatDuration이 첫박
+        // beatNumber가 N이면 현재 시간 - (N-1)*beatDuration이 첫박
+        const beatsFromDownbeat = this.tapSyncCurrentBeat - 1;
+        const estimatedDownbeatTime = currentTime - (beatsFromDownbeat * beatDuration);
 
-    // 커맨드 전송
-    this.onCommand?.('toggle-global-sync-metronome', {
-      enabled: this.globalSyncMetronomeEnabled
+        // 첫박 오프셋 계산 (barDuration으로 모듈러)
+        const barDuration = beatDuration * beatsPerBar;
+        let calculatedOffset = estimatedDownbeatTime % barDuration;
+        if (calculatedOffset < 0) calculatedOffset += barDuration;
+
+        // 히스토리에 추가
+        this.tapSyncHistory.push({
+          beatNumber: this.tapSyncCurrentBeat,
+          tappedTime: currentTime,
+          calculatedOffset
+        });
+
+        // 최근 16개만 유지
+        if (this.tapSyncHistory.length > 16) {
+          this.tapSyncHistory.shift();
+        }
+
+        // 평균 오프셋 계산 및 점수 산출
+        if (this.tapSyncHistory.length >= 2) {
+          const { averageOffset, score } = this.calculateTapSyncResult(barDuration);
+
+          this.tapSyncScore = score;
+
+          // 글로벌 오프셋 업데이트
+          this.onCommand?.('update-global-sync', { offset: averageOffset });
+        } else if (this.tapSyncHistory.length === 1) {
+          // 첫 번째 탭은 그대로 사용
+          this.tapSyncScore = 0;
+          this.onCommand?.('update-global-sync', { offset: calculatedOffset });
+        }
+
+        // UI 업데이트
+        this.render();
+        this.setupEventListeners();
+      }
     });
+  }
+
+  /**
+   * TAP Sync 결과 계산: 평균 오프셋과 정확도 점수
+   * @param barDuration 한 마디 길이 (초)
+   * @returns { averageOffset, score }
+   */
+  private calculateTapSyncResult(barDuration: number): { averageOffset: number; score: number } {
+    if (this.tapSyncHistory.length < 2) {
+      return { averageOffset: 0, score: 0 };
+    }
+
+    const offsets = this.tapSyncHistory.map(t => t.calculatedOffset);
+
+    // 원형 평균 계산 (0과 barDuration이 인접한 값이므로)
+    // 각 오프셋을 각도로 변환하여 평균 계산
+    let sinSum = 0;
+    let cosSum = 0;
+    for (const offset of offsets) {
+      const angle = (offset / barDuration) * 2 * Math.PI;
+      sinSum += Math.sin(angle);
+      cosSum += Math.cos(angle);
+    }
+    const avgAngle = Math.atan2(sinSum / offsets.length, cosSum / offsets.length);
+    let averageOffset = (avgAngle / (2 * Math.PI)) * barDuration;
+    if (averageOffset < 0) averageOffset += barDuration;
+
+    // 표준편차 계산 (원형 거리 기준)
+    let varianceSum = 0;
+    for (const offset of offsets) {
+      // 원형 거리: 두 오프셋 간의 최소 거리
+      let diff = Math.abs(offset - averageOffset);
+      if (diff > barDuration / 2) diff = barDuration - diff;
+      varianceSum += diff * diff;
+    }
+    const stdDev = Math.sqrt(varianceSum / offsets.length);
+    const stdDevMs = stdDev * 1000; // ms로 변환
+
+    // === 1. 일관성 점수 (기존 로직) ===
+    // 비선형 점수 계산 (인간 청각 인지 기반)
+    // 15ms 이하: 90-100% (매우 정밀, 프로 수준)
+    // 25ms: 80% (좋음, 인지 불가 수준)
+    // 40ms: 50% (보통, 약간 느껴짐)
+    // 60ms+: 0% (부정확, 명확히 어긋남)
+    let consistencyScore: number;
+    if (stdDevMs <= 15) {
+      consistencyScore = 90 + (1 - stdDevMs / 15) * 10;
+    } else if (stdDevMs <= 25) {
+      consistencyScore = 80 + (1 - (stdDevMs - 15) / 10) * 10;
+    } else if (stdDevMs <= 40) {
+      consistencyScore = 50 + (1 - (stdDevMs - 25) / 15) * 30;
+    } else if (stdDevMs <= 60) {
+      consistencyScore = (1 - (stdDevMs - 40) / 20) * 50;
+    } else {
+      consistencyScore = 0;
+    }
+
+    // === 2. 템포 정확도 점수 (신규) ===
+    // 탭 간격을 분석하여 실제 BPM과 설정된 BPM 비교
+    let tempoScore = 100;
+    if (this.tapSyncHistory.length >= 3 && this.profile?.tempo) {
+      const tappedTimes = this.tapSyncHistory.map(t => t.tappedTime);
+      const intervals: number[] = [];
+      for (let i = 1; i < tappedTimes.length; i++) {
+        intervals.push(tappedTimes[i] - tappedTimes[i - 1]);
+      }
+
+      // 평균 탭 간격 (초)
+      const avgInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+
+      // 설정된 BPM 기준 beat 간격 (초)
+      const expectedBeatDuration = 60 / this.profile.tempo;
+
+      // 템포 오차율 계산 (%)
+      // avgInterval이 expectedBeatDuration과 얼마나 차이나는지
+      const tempoErrorPercent = Math.abs(avgInterval - expectedBeatDuration) / expectedBeatDuration * 100;
+
+      // 템포 정확도 점수 계산
+      // 0-2%: 100점 (거의 완벽)
+      // 2-5%: 80-100점 (좋음)
+      // 5-10%: 50-80점 (보통)
+      // 10-15%: 20-50점 (부정확)
+      // 15%+: 0-20점 (많이 벗어남)
+      if (tempoErrorPercent <= 2) {
+        tempoScore = 100;
+      } else if (tempoErrorPercent <= 5) {
+        tempoScore = 80 + (1 - (tempoErrorPercent - 2) / 3) * 20;
+      } else if (tempoErrorPercent <= 10) {
+        tempoScore = 50 + (1 - (tempoErrorPercent - 5) / 5) * 30;
+      } else if (tempoErrorPercent <= 15) {
+        tempoScore = 20 + (1 - (tempoErrorPercent - 10) / 5) * 30;
+      } else {
+        tempoScore = Math.max(0, 20 - (tempoErrorPercent - 15) * 2);
+      }
+    }
+
+    // === 3. 최종 점수: 일관성 70% + 템포 정확도 30% ===
+    // 일관성이 더 중요하지만, 템포가 많이 벗어나면 감점
+    const finalScore = consistencyScore * 0.7 + tempoScore * 0.3;
+
+    return { averageOffset, score: Math.round(finalScore) };
+  }
+
+  /**
+   * 박자에 따른 소리를 재생합니다.
+   * 1박: 강한 클릭 (낮은 음), 나머지: 약한 클릭 (높은 음)
+   */
+  private playBeatSound(beat: number, _beatsPerBar: number) {
+    const isDownbeat = beat === 1;
+    this.tapSyncMetronome.playClickNow(isDownbeat);
+  }
+
+  /**
+   * 싱크 미세 조정 핸들러
+   * @param delta 조정값 (초 단위, 예: 0.01 = +10ms, -0.01 = -10ms, 0.001 = +1ms)
+   */
+  private handleSyncFineTune(delta: number) {
+    if (!this.profile) return;
+
+    const currentOffset = this.profile.globalMetronomeOffset || 0;
+    const newOffset = Math.max(0, currentOffset + delta); // 0 이상으로 제한
+
+    this.onCommand?.('update-global-sync', { offset: newOffset });
 
     // UI 업데이트
     this.render();
     this.setupEventListeners();
+  }
+
+  /**
+   * 싱크 초기화 핸들러
+   */
+  private handleSyncClear() {
+    this.tapSyncCurrentBeat = 0;
+    this.isGlobalMetronomeEnabled = false;
+
+    // TAP Sync 히스토리 초기화
+    this.tapSyncHistory = [];
+    this.tapSyncScore = 0;
+    this.tapSyncLastResetTime = 0;
+
+    this.onCommand?.('clear-global-sync', {});
+    this.onCommand?.('toggle-global-metronome', { enabled: false });
+
+    // UI 업데이트
+    this.render();
+    this.setupEventListeners();
+  }
+
+  /**
+   * 글로벌 메트로놈 토글 핸들러
+   */
+  private handleGlobalMetronomeToggle() {
+    this.isGlobalMetronomeEnabled = !this.isGlobalMetronomeEnabled;
+
+    this.onCommand?.('toggle-global-metronome', { enabled: this.isGlobalMetronomeEnabled });
+
+    // UI 업데이트
+    this.render();
+    this.setupEventListeners();
+  }
+
+  /**
+   * 메트로놈 볼륨 변경 핸들러
+   * @param volume 볼륨 (0-100)
+   */
+  private handleMetronomeVolumeChange(volume: number) {
+    this.metronomeVolume = volume;
+
+    // TAP Sync 피드백용 메트로놈 볼륨 업데이트
+    this.tapSyncMetronome.setVolume(volume / 100);
+
+    // 글로벌 메트로놈 볼륨 업데이트
+    this.onCommand?.('set-metronome-volume', { volume: volume / 100 });
   }
 
   /**
@@ -3309,10 +4082,689 @@ export class UIController {
     }
   }
 
+  // ========== Beat Sync Modal Methods ==========
+
+  /**
+   * Beat Sync 모달을 엽니다.
+   */
+  private openBeatSyncModal(segmentId: string) {
+    const segment = this.profile?.segments.find(s => s.id === segmentId);
+    if (!segment) return;
+
+    this.resetLocalTapSync();
+
+    // 모달 HTML 생성 및 추가
+    const modalHTML = this.getBeatSyncModalHTML(segment);
+    const modalContainer = document.createElement('div');
+    modalContainer.id = 'beat-sync-modal-container';
+    modalContainer.innerHTML = modalHTML;
+
+    // YouTube 테마 감지 및 적용 (html[dark] 속성 확인)
+    const isDarkMode = document.documentElement.hasAttribute('dark');
+    if (!isDarkMode) {
+      modalContainer.classList.add('light-theme');
+    }
+
+    this.ui.appendChild(modalContainer);
+
+    // 이벤트 리스너 설정
+    this.setupBeatSyncModalEvents(segment);
+  }
+
+  /**
+   * Beat Sync 모달을 닫습니다.
+   */
+  private closeBeatSyncModal() {
+    const modalContainer = this.ui.getElementById('beat-sync-modal-container');
+    if (modalContainer) {
+      modalContainer.remove();
+    }
+    this.resetLocalTapSync();
+  }
+
+  /**
+   * 로컬 TAP Sync 상태를 초기화합니다.
+   */
+  private resetLocalTapSync() {
+    this.localTapSyncCurrentBeat = 0;
+    this.localTapSyncHistory = [];
+    this.localTapSyncScore = 0;
+    this.localTapSyncLastResetTime = 0;
+  }
+
+  /**
+   * Beat Sync 모달 HTML을 생성합니다.
+   */
+  private getBeatSyncModalHTML(segment: LoopSegment): string {
+    const useCustom = segment.useGlobalSync === false; // 커스텀 설정 사용 여부
+    const localTempo = segment.localTempo || this.profile?.tempo || 120;
+    const localTimeSignature = segment.localTimeSignature || this.profile?.timeSignature || '4/4';
+    const localOffset = segment.localMetronomeOffset;
+    const hasLocalOffset = typeof localOffset === 'number';
+
+    const timeSignatures = ['2/4', '3/4', '4/4', '5/4', '3/8', '6/8', '7/8', '9/8', '12/8', '6/4'];
+
+    return `
+      <div class="beat-sync-modal-overlay">
+        <div class="beat-sync-modal">
+          <div class="beat-sync-modal-header">
+            <h3>Beat Sync - ${segment.label || 'Loop'}</h3>
+            <button class="beat-sync-modal-close" id="beatSyncModalClose">&times;</button>
+          </div>
+          <div class="beat-sync-modal-body">
+            <div class="beat-sync-global-toggle">
+              <label class="checkbox-label">
+                <input type="checkbox" id="useCustomSyncCheckbox" ${useCustom ? 'checked' : ''}>
+                <span>Use custom settings</span>
+              </label>
+            </div>
+
+            <div class="beat-sync-local-settings" id="localSettingsSection" style="${useCustom ? '' : 'opacity: 0.5; pointer-events: none;'}">
+              <div class="setting-row">
+                <label>BPM:</label>
+                <input type="text" id="localTempoInput" class="tempo-input" value="${localTempo}" ${useCustom ? '' : 'disabled'}>
+              </div>
+
+              <div class="setting-row">
+                <label>Time Signature:</label>
+                <select id="localTimeSignature" ${useCustom ? '' : 'disabled'}>
+                  ${timeSignatures.map(ts => `<option value="${ts}" ${ts === localTimeSignature ? 'selected' : ''}>${ts}</option>`).join('')}
+                </select>
+              </div>
+
+              <div class="setting-row tap-sync-section">
+                <label>Beat Sync:</label>
+                <div class="tap-sync-controls-modal">
+                  <button class="btn btn-tap-sync-modal" id="localTapSyncBtn" ${useCustom ? '' : 'disabled'}>
+                    TAP
+                  </button>
+                  <div class="tap-sync-score-modal" id="localTapSyncScore" style="display: none;">
+                    --%
+                  </div>
+                </div>
+              </div>
+
+              <div class="setting-row" id="localSyncResultRow">
+                <label>1st Beat:</label>
+                <span class="sync-result-value" id="localSyncResult">${hasLocalOffset ? this.formatSyncTime(localOffset!) : '--'}</span>
+                <div class="fine-tune-buttons">
+                  <button class="btn-fine-tune" id="localSyncMinus10" ${useCustom ? '' : 'disabled'}>-10</button>
+                  <button class="btn-fine-tune" id="localSyncMinus1" ${useCustom ? '' : 'disabled'}>-1</button>
+                  <button class="btn-fine-tune" id="localSyncPlus1" ${useCustom ? '' : 'disabled'}>+1</button>
+                  <button class="btn-fine-tune" id="localSyncPlus10" ${useCustom ? '' : 'disabled'}>+10</button>
+                  <button class="btn-fine-tune btn-clear" id="localSyncClear" ${useCustom ? '' : 'disabled'}>Clear</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="beat-sync-modal-footer">
+            <button class="btn btn-cancel" id="beatSyncModalCancel">Cancel</button>
+            <button class="btn btn-save" id="beatSyncModalSave">Save</button>
+          </div>
+        </div>
+      </div>
+      <style>
+        /* 테마 변수 정의 - 다크 테마 (기본값) */
+        #beat-sync-modal-container {
+          --modal-bg: #212121;
+          --modal-bg-secondary: #181818;
+          --modal-border: #3a3a3a;
+          --modal-text: #fff;
+          --modal-text-secondary: #aaa;
+          --modal-accent: #3ea6ff;
+        }
+        /* 라이트 테마 */
+        #beat-sync-modal-container.light-theme {
+          --modal-bg: #fff;
+          --modal-bg-secondary: #f2f2f2;
+          --modal-border: #d3d3d3;
+          --modal-text: #0f0f0f;
+          --modal-text-secondary: #606060;
+          --modal-accent: #065fd4;
+        }
+        .beat-sync-modal-overlay {
+          position: fixed;
+          top: 0;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          background: rgba(0, 0, 0, 0.6);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          z-index: 10001;
+        }
+        .beat-sync-modal {
+          background: var(--modal-bg);
+          border-radius: 8px;
+          width: 320px;
+          max-width: 90vw;
+          box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+          color: var(--modal-text);
+        }
+        .beat-sync-modal-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          padding: 12px 16px;
+          border-bottom: 1px solid var(--modal-border);
+        }
+        .beat-sync-modal-header h3 {
+          margin: 0;
+          font-size: 14px;
+          font-weight: 600;
+        }
+        .beat-sync-modal-close {
+          background: none;
+          border: none;
+          font-size: 20px;
+          cursor: pointer;
+          color: var(--modal-text-secondary);
+          padding: 0;
+          line-height: 1;
+        }
+        .beat-sync-modal-close:hover {
+          color: var(--modal-text);
+        }
+        .beat-sync-modal-body {
+          padding: 16px;
+        }
+        .beat-sync-global-toggle {
+          margin-bottom: 16px;
+          padding-bottom: 12px;
+          border-bottom: 1px solid var(--modal-border);
+        }
+        .checkbox-label {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          cursor: pointer;
+          font-size: 13px;
+        }
+        .checkbox-label input[type="checkbox"] {
+          width: 16px;
+          height: 16px;
+          cursor: pointer;
+        }
+        .beat-sync-local-settings {
+          transition: opacity 0.2s;
+        }
+        .setting-row {
+          display: flex;
+          align-items: center;
+          margin-bottom: 12px;
+          gap: 8px;
+        }
+        .setting-row label {
+          min-width: 80px;
+          font-size: 12px;
+          color: var(--modal-text-secondary);
+        }
+        .setting-row .tempo-input {
+          width: 60px;
+          padding: 4px 8px;
+          border: 1px solid var(--modal-border);
+          border-radius: 4px;
+          background: var(--modal-bg-secondary);
+          color: var(--modal-text);
+          font-size: 13px;
+        }
+        .setting-row select {
+          padding: 4px 8px;
+          border: 1px solid var(--modal-border);
+          border-radius: 4px;
+          background: var(--modal-bg-secondary);
+          color: var(--modal-text);
+          font-size: 13px;
+        }
+        .tap-sync-controls-modal {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+        .btn-tap-sync-modal {
+          padding: 6px 16px;
+          border: 2px solid var(--modal-accent);
+          border-radius: 4px;
+          background: transparent;
+          color: var(--modal-accent);
+          font-weight: 600;
+          cursor: pointer;
+          transition: all 0.1s;
+        }
+        .btn-tap-sync-modal:hover:not(:disabled) {
+          background: var(--modal-accent);
+          color: white;
+        }
+        .btn-tap-sync-modal:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
+        }
+        .btn-tap-sync-modal.tapped {
+          background: var(--modal-accent);
+          color: white;
+          transform: scale(0.95);
+        }
+        .tap-sync-score-modal {
+          font-size: 14px;
+          font-weight: 600;
+        }
+        .sync-result-value {
+          font-family: monospace;
+          font-size: 12px;
+        }
+        .fine-tune-buttons {
+          display: flex;
+          gap: 4px;
+          flex-wrap: wrap;
+        }
+        .btn-fine-tune {
+          padding: 2px 6px;
+          border: 1px solid var(--modal-border);
+          border-radius: 3px;
+          background: var(--modal-bg-secondary);
+          color: var(--modal-text);
+          font-size: 11px;
+          cursor: pointer;
+        }
+        .btn-fine-tune:hover:not(:disabled) {
+          background: var(--modal-border);
+        }
+        .btn-fine-tune:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
+        }
+        .btn-fine-tune.btn-clear {
+          color: #f44;
+        }
+        .beat-sync-modal-footer {
+          display: flex;
+          justify-content: flex-end;
+          gap: 8px;
+          padding: 12px 16px;
+          border-top: 1px solid var(--modal-border);
+        }
+        .btn-cancel {
+          padding: 6px 16px;
+          border: 1px solid var(--modal-border);
+          border-radius: 4px;
+          background: transparent;
+          color: var(--modal-text);
+          cursor: pointer;
+        }
+        .btn-cancel:hover {
+          background: var(--modal-bg-secondary);
+        }
+        .btn-save {
+          padding: 6px 16px;
+          border: none;
+          border-radius: 4px;
+          background: var(--modal-accent);
+          color: white;
+          cursor: pointer;
+          font-weight: 500;
+        }
+        .btn-save:hover {
+          opacity: 0.9;
+        }
+      </style>
+    `;
+  }
+
+  /**
+   * Beat Sync 모달 이벤트 리스너를 설정합니다.
+   */
+  private setupBeatSyncModalEvents(segment: LoopSegment) {
+    const modalContainer = this.ui.getElementById('beat-sync-modal-container');
+    if (!modalContainer) return;
+
+    // 닫기 버튼
+    const closeBtn = modalContainer.querySelector('#beatSyncModalClose');
+    closeBtn?.addEventListener('click', () => this.closeBeatSyncModal());
+
+    // 취소 버튼
+    const cancelBtn = modalContainer.querySelector('#beatSyncModalCancel');
+    cancelBtn?.addEventListener('click', () => this.closeBeatSyncModal());
+
+    // 오버레이 클릭으로 닫기
+    const overlay = modalContainer.querySelector('.beat-sync-modal-overlay');
+    overlay?.addEventListener('click', (e) => {
+      if (e.target === overlay) {
+        this.closeBeatSyncModal();
+      }
+    });
+
+    // Use custom settings 체크박스
+    const useCustomCheckbox = modalContainer.querySelector('#useCustomSyncCheckbox') as HTMLInputElement;
+    const localSettingsSection = modalContainer.querySelector('#localSettingsSection') as HTMLElement;
+
+    useCustomCheckbox?.addEventListener('change', () => {
+      const useCustom = useCustomCheckbox.checked;
+      if (localSettingsSection) {
+        localSettingsSection.style.opacity = useCustom ? '1' : '0.5';
+        localSettingsSection.style.pointerEvents = useCustom ? 'auto' : 'none';
+      }
+
+      // 모든 입력 필드 disabled 상태 변경
+      const inputs = localSettingsSection?.querySelectorAll('input, select, button');
+      inputs?.forEach(input => {
+        (input as HTMLInputElement | HTMLSelectElement | HTMLButtonElement).disabled = !useCustom;
+      });
+    });
+
+    // TAP Sync 버튼
+    const tapBtn = modalContainer.querySelector('#localTapSyncBtn') as HTMLButtonElement;
+    tapBtn?.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      if (tapBtn.disabled) return;
+      this.handleLocalTapSync(modalContainer);
+    });
+
+    // 미세 조정 버튼
+    const adjustOffset = (delta: number) => {
+      const resultSpan = modalContainer.querySelector('#localSyncResult') as HTMLElement;
+      if (!resultSpan) return;
+
+      const currentOffset = this.parseTimeToSeconds(resultSpan.textContent || '0');
+      const newOffset = Math.max(0, currentOffset + delta / 1000);
+      resultSpan.textContent = this.formatSyncTime(newOffset);
+    };
+
+    modalContainer.querySelector('#localSyncMinus10')?.addEventListener('click', () => adjustOffset(-10));
+    modalContainer.querySelector('#localSyncMinus1')?.addEventListener('click', () => adjustOffset(-1));
+    modalContainer.querySelector('#localSyncPlus1')?.addEventListener('click', () => adjustOffset(1));
+    modalContainer.querySelector('#localSyncPlus10')?.addEventListener('click', () => adjustOffset(10));
+
+    // Clear 버튼
+    modalContainer.querySelector('#localSyncClear')?.addEventListener('click', () => {
+      const resultRow = modalContainer.querySelector('#localSyncResultRow') as HTMLElement;
+      const resultSpan = modalContainer.querySelector('#localSyncResult') as HTMLElement;
+      if (resultRow) resultRow.style.display = 'none';
+      if (resultSpan) resultSpan.textContent = '--';
+      this.resetLocalTapSync();
+      this.updateLocalTapSyncUI(modalContainer);
+    });
+
+    // 저장 버튼
+    const saveBtn = modalContainer.querySelector('#beatSyncModalSave');
+    saveBtn?.addEventListener('click', () => {
+      this.saveBeatSyncSettings(modalContainer, segment.id);
+    });
+  }
+
+  /**
+   * 로컬 TAP Sync를 처리합니다.
+   */
+  private handleLocalTapSync(modalContainer: HTMLElement) {
+    const tempoInput = modalContainer.querySelector('#localTempoInput') as HTMLInputElement;
+    const timeSignatureSelect = modalContainer.querySelector('#localTimeSignature') as HTMLSelectElement;
+
+    const bpm = parseInt(tempoInput?.value || '120', 10);
+    const timeSignature = timeSignatureSelect?.value || '4/4';
+    const beatsPerBar = parseInt(timeSignature.split('/')[0], 10);
+    const beatDuration = 60 / bpm;
+
+    // 현재 박자 증가
+    this.localTapSyncCurrentBeat = (this.localTapSyncCurrentBeat % beatsPerBar) + 1;
+
+    // 소리 피드백
+    const isDownbeat = this.localTapSyncCurrentBeat === 1;
+    this.tapSyncMetronome.playClickNow(isDownbeat);
+
+    // TAP 버튼 시각적 피드백
+    const tapBtn = modalContainer.querySelector('#localTapSyncBtn') as HTMLButtonElement;
+    if (tapBtn) {
+      tapBtn.textContent = `${this.localTapSyncCurrentBeat}/${beatsPerBar}`;
+      tapBtn.classList.add('tapped');
+      setTimeout(() => tapBtn.classList.remove('tapped'), 100);
+    }
+
+    // 5초 이상 탭이 없으면 히스토리 리셋
+    const now = Date.now();
+    if (now - this.localTapSyncLastResetTime > 5000 && this.localTapSyncHistory.length > 0) {
+      this.localTapSyncHistory = [];
+      this.localTapSyncScore = 0;
+    }
+    this.localTapSyncLastResetTime = now;
+
+    // 현재 탭 기록
+    this.onCommand?.('get-current-time', {
+      callback: (currentTime: number) => {
+        const beatsFromDownbeat = this.localTapSyncCurrentBeat - 1;
+        const estimatedDownbeatTime = currentTime - (beatsFromDownbeat * beatDuration);
+
+        const barDuration = beatDuration * beatsPerBar;
+        let calculatedOffset = estimatedDownbeatTime % barDuration;
+        if (calculatedOffset < 0) calculatedOffset += barDuration;
+
+        this.localTapSyncHistory.push({
+          beatNumber: this.localTapSyncCurrentBeat,
+          tappedTime: currentTime,
+          calculatedOffset
+        });
+
+        if (this.localTapSyncHistory.length > 16) {
+          this.localTapSyncHistory.shift();
+        }
+
+        // 결과 계산 및 UI 업데이트
+        if (this.localTapSyncHistory.length >= 2) {
+          const { averageOffset, score } = this.calculateLocalTapSyncResult(barDuration);
+          this.localTapSyncScore = score;
+
+          // 1st Beat 표시 업데이트
+          const resultRow = modalContainer.querySelector('#localSyncResultRow') as HTMLElement;
+          const resultSpan = modalContainer.querySelector('#localSyncResult') as HTMLElement;
+          if (resultRow) resultRow.style.display = 'flex';
+          if (resultSpan) resultSpan.textContent = this.formatSyncTime(averageOffset);
+        }
+
+        this.updateLocalTapSyncUI(modalContainer);
+      }
+    });
+  }
+
+  /**
+   * 로컬 TAP Sync 결과를 계산합니다.
+   */
+  private calculateLocalTapSyncResult(barDuration: number): { averageOffset: number; score: number } {
+    if (this.localTapSyncHistory.length < 2) {
+      return { averageOffset: 0, score: 0 };
+    }
+
+    const offsets = this.localTapSyncHistory.map(t => t.calculatedOffset);
+
+    // 원형 평균 계산
+    let sinSum = 0;
+    let cosSum = 0;
+    for (const offset of offsets) {
+      const angle = (offset / barDuration) * 2 * Math.PI;
+      sinSum += Math.sin(angle);
+      cosSum += Math.cos(angle);
+    }
+    const avgAngle = Math.atan2(sinSum / offsets.length, cosSum / offsets.length);
+    let averageOffset = (avgAngle / (2 * Math.PI)) * barDuration;
+    if (averageOffset < 0) averageOffset += barDuration;
+
+    // 표준편차 계산
+    let varianceSum = 0;
+    for (const offset of offsets) {
+      let diff = Math.abs(offset - averageOffset);
+      if (diff > barDuration / 2) diff = barDuration - diff;
+      varianceSum += diff * diff;
+    }
+    const stdDev = Math.sqrt(varianceSum / offsets.length);
+    const stdDevMs = stdDev * 1000;
+
+    // 점수 계산
+    let consistencyScore: number;
+    if (stdDevMs <= 15) {
+      consistencyScore = 90 + (1 - stdDevMs / 15) * 10;
+    } else if (stdDevMs <= 25) {
+      consistencyScore = 80 + (1 - (stdDevMs - 15) / 10) * 10;
+    } else if (stdDevMs <= 40) {
+      consistencyScore = 50 + (1 - (stdDevMs - 25) / 15) * 30;
+    } else if (stdDevMs <= 60) {
+      consistencyScore = (1 - (stdDevMs - 40) / 20) * 50;
+    } else {
+      consistencyScore = 0;
+    }
+
+    // 템포 정확도 계산
+    let tempoScore = 100;
+    if (this.localTapSyncHistory.length >= 3) {
+      const tappedTimes = this.localTapSyncHistory.map(t => t.tappedTime);
+      const intervals: number[] = [];
+      for (let i = 1; i < tappedTimes.length; i++) {
+        intervals.push(tappedTimes[i] - tappedTimes[i - 1]);
+      }
+      const avgInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+      const tempoInput = this.ui.querySelector('#localTempoInput') as HTMLInputElement;
+      const bpm = parseInt(tempoInput?.value || '120', 10);
+      const expectedBeatDuration = 60 / bpm;
+      const tempoErrorPercent = Math.abs(avgInterval - expectedBeatDuration) / expectedBeatDuration * 100;
+
+      if (tempoErrorPercent <= 2) {
+        tempoScore = 100;
+      } else if (tempoErrorPercent <= 5) {
+        tempoScore = 80 + (1 - (tempoErrorPercent - 2) / 3) * 20;
+      } else if (tempoErrorPercent <= 10) {
+        tempoScore = 50 + (1 - (tempoErrorPercent - 5) / 5) * 30;
+      } else if (tempoErrorPercent <= 15) {
+        tempoScore = 20 + (1 - (tempoErrorPercent - 10) / 5) * 30;
+      } else {
+        tempoScore = Math.max(0, 20 - (tempoErrorPercent - 15) * 2);
+      }
+    }
+
+    const finalScore = consistencyScore * 0.7 + tempoScore * 0.3;
+    return { averageOffset, score: Math.round(finalScore) };
+  }
+
+  /**
+   * 로컬 TAP Sync UI를 업데이트합니다.
+   */
+  private updateLocalTapSyncUI(modalContainer: HTMLElement) {
+    const scoreDiv = modalContainer.querySelector('#localTapSyncScore') as HTMLElement;
+    if (!scoreDiv) return;
+
+    const tapCount = this.localTapSyncHistory.length;
+    const hasEnoughSamples = tapCount >= this.TAP_SYNC_MIN_SAMPLES;
+
+    if (tapCount > 0) {
+      scoreDiv.style.display = 'block';
+      const scoreColor = hasEnoughSamples ? this.getScoreColor(this.localTapSyncScore) : '#f44336';
+      scoreDiv.style.color = scoreColor;
+      scoreDiv.textContent = hasEnoughSamples ? `${this.localTapSyncScore}%` : '--%';
+      scoreDiv.title = `Sync accuracy (${tapCount}/${this.TAP_SYNC_MIN_SAMPLES} taps)`;
+    } else {
+      scoreDiv.style.display = 'none';
+    }
+  }
+
+  /**
+   * 시간 문자열을 초로 변환합니다.
+   */
+  private parseTimeToSeconds(timeStr: string): number {
+    if (timeStr === '--') return 0;
+    const parts = timeStr.split(':');
+    if (parts.length === 2) {
+      const mins = parseInt(parts[0], 10);
+      const secs = parseFloat(parts[1]);
+      return mins * 60 + secs;
+    }
+    return parseFloat(timeStr) || 0;
+  }
+
+  /**
+   * Beat Sync 설정을 저장합니다.
+   */
+  private saveBeatSyncSettings(modalContainer: HTMLElement, segmentId: string) {
+    const useCustomCheckbox = modalContainer.querySelector('#useCustomSyncCheckbox') as HTMLInputElement;
+    const tempoInput = modalContainer.querySelector('#localTempoInput') as HTMLInputElement;
+    const timeSignatureSelect = modalContainer.querySelector('#localTimeSignature') as HTMLSelectElement;
+    const resultSpan = modalContainer.querySelector('#localSyncResult') as HTMLElement;
+
+    const useCustom = useCustomCheckbox?.checked ?? false;
+    const localTempo = parseInt(tempoInput?.value || '120', 10);
+    const localTimeSignature = timeSignatureSelect?.value || '4/4';
+    const resultText = resultSpan?.textContent || '--';
+    const localOffset = resultText !== '--' ? this.parseTimeToSeconds(resultText) : undefined;
+
+    this.onCommand?.('update-segment-sync', {
+      segmentId,
+      useGlobalSync: !useCustom,  // 반전: useCustom이 true면 useGlobalSync는 false
+      localTempo: useCustom ? localTempo : undefined,
+      localTimeSignature: useCustom ? localTimeSignature : undefined,
+      localMetronomeOffset: useCustom ? localOffset : undefined
+    });
+
+    this.closeBeatSyncModal();
+  }
+
+  // ========== End Beat Sync Modal Methods ==========
+
+  // ========== Count-In Methods ==========
+
+  /**
+   * 카운트인/메트로놈 비트 표시를 업데이트합니다.
+   * @param currentBeat 현재 박 (1-indexed)
+   * @param totalBeats 총 박 수
+   * @param mode 표시 모드 ('count-in' = 보라색, 'metronome' = 우드톤)
+   */
+  showCountInBeat(currentBeat: number, totalBeats: number, mode: 'count-in' | 'metronome' = 'count-in'): void {
+    const display = this.ui.querySelector('#countInDisplay') as HTMLElement;
+    if (!display) return;
+
+    // 모드에 따라 클래스 설정
+    if (mode === 'metronome') {
+      display.classList.add('metronome-mode');
+    } else {
+      display.classList.remove('metronome-mode');
+    }
+
+    // 박자표에 맞게 beat 요소 업데이트
+    display.innerHTML = '';
+    for (let i = 1; i <= totalBeats; i++) {
+      const beatElement = document.createElement('span');
+      beatElement.className = `count-beat${i === currentBeat ? ' active' : ''}`;
+      beatElement.dataset.beat = String(i);
+      beatElement.textContent = String(i);
+      display.appendChild(beatElement);
+    }
+  }
+
+  /**
+   * 카운트인/메트로놈 표시를 숨깁니다 (비트 하이라이트만 제거).
+   */
+  hideCountInDisplay(): void {
+    const display = this.ui.querySelector('#countInDisplay') as HTMLElement;
+    if (!display) return;
+
+    display.classList.remove('metronome-mode');
+
+    // 현재 박자표에 맞게 리셋 (active 클래스 제거)
+    const beatsPerBar = this.profile?.timeSignature
+      ? parseInt(this.profile.timeSignature.split('/')[0], 10)
+      : 4;
+
+    display.innerHTML = Array.from({ length: beatsPerBar }, (_, i) =>
+      `<span class="count-beat" data-beat="${i + 1}">${i + 1}</span>`
+    ).join('');
+  }
+
+  // ========== End Count-In Methods ==========
+
   /**
    * UI를 정리합니다.
    */
   cleanup() {
+    // TAP Sync 메트로놈 정리
+    this.tapSyncMetronome.dispose();
+
+    // 글로벌 메트로놈 상태 초기화
+    this.isGlobalMetronomeEnabled = false;
+
     this.ui.remove();
   }
 }

@@ -222,6 +222,14 @@ export class YouTubeLoopPractice {
           this.duplicateSegment(data?.segmentId);
           this.refreshUI();
           break;
+        case 'quantize-segment':
+          this.quantizeSegment(data?.segmentId);
+          this.refreshUI();
+          break;
+        case 'update-segment-sync':
+          this.updateSegmentSync(data?.segmentId, data);
+          this.refreshUI();
+          break;
         case 'update-label':
           this.updateSegment(data?.segmentId, { label: data?.label });
           this.refreshUI();
@@ -317,6 +325,31 @@ export class YouTubeLoopPractice {
         case 'toggle-global-sync-metronome':
           this.toggleGlobalSyncMetronome(data?.enabled);
           break;
+        case 'get-current-time':
+          // 현재 비디오 시간을 콜백으로 전달
+          if (this.video && data?.callback) {
+            data.callback(this.video.currentTime);
+          }
+          break;
+        case 'clear-global-sync':
+          // 글로벌 싱크 초기화
+          this.updateProfile(profile => {
+            profile.globalMetronomeOffset = undefined;
+          });
+          this.saveProfile();
+          // 메트로놈도 중지
+          this.loopController?.stopGlobalSyncMetronome();
+          break;
+        case 'toggle-global-metronome':
+          // 글로벌 메트로놈 토글
+          this.handleGlobalMetronomeToggle(data?.enabled);
+          break;
+        case 'set-metronome-volume':
+          // 메트로놈 볼륨 설정
+          if (this.loopController && typeof data?.volume === 'number') {
+            this.loopController.setMetronomeVolume(data.volume);
+          }
+          break;
         case 'reorder-segments':
           // segments 배열이 직접 전달된 경우 (UI에서 이미 재정렬됨)
           if (data?.segments) {
@@ -334,6 +367,11 @@ export class YouTubeLoopPractice {
           this.add8BarsAfterSegment(data?.segmentId);
           this.refreshUI();
           break;
+        // 카운트인 기능 임시 비활성화
+        // case 'toggle-count-in':
+        //   this.toggleCountIn(data?.segmentId);
+        //   this.refreshUI();
+        //   break;
         default:
           console.warn('Unknown UI command:', command);
       }
@@ -624,27 +662,44 @@ export class YouTubeLoopPractice {
    * 메트로놈이 활성화되면 모든 루프를 비활성화하고 일반 YouTube 재생 상태로 전환합니다.
    */
   private toggleGlobalSyncMetronome(enabled: boolean) {
+    this.handleGlobalMetronomeToggle(enabled);
+  }
+
+  /**
+   * 글로벌 메트로놈을 토글합니다.
+   * 영상 재생 중 박자에 맞춰 메트로놈 클릭음을 재생합니다.
+   */
+  private handleGlobalMetronomeToggle(enabled: boolean) {
     if (!this.loopController || !this.profile?.tempo || !this.profile?.timeSignature) {
+      console.log('[Global Metronome] 시작 실패: BPM 또는 박자표 미설정');
       return;
     }
 
-    console.log('[Global Sync Metronome] Toggle:', { enabled, video: this.video?.currentTime });
+    // globalMetronomeOffset이 설정되어 있어야 메트로놈 사용 가능
+    if (typeof this.profile.globalMetronomeOffset !== 'number') {
+      console.log('[Global Metronome] 시작 실패: Beat Sync 미설정');
+      return;
+    }
+
+    console.log('[Global Metronome] Toggle:', { enabled, videoTime: this.video?.currentTime });
 
     if (enabled) {
-      // 메트로놈 활성화: 모든 루프 비활성화
-      const wasActive = this.loopController.getActive();
-      if (wasActive) {
-        console.log('[Global Sync Metronome] Disabling active loop:', wasActive.id);
-        this.loopController.setActive(null);
-      }
+      // 비트 콜백 설정 (UI 업데이트용)
+      this.loopController.setMetronomeBeatCallback((beat, total) => {
+        this.uiController?.showCountInBeat(beat, total, 'metronome');
+      });
 
-      // 글로벌 싱크 메트로놈 시작 (루프 없이)
+      // 메트로놈 활성화
       if (this.video && !this.video.paused) {
         this.loopController.startGlobalSyncMetronome();
       }
     } else {
+      // 비트 콜백 해제
+      this.loopController.setMetronomeBeatCallback(null);
+      this.uiController?.hideCountInDisplay();
+
       // 메트로놈 비활성화
-      console.log('[Global Sync Metronome] Stopping metronome');
+      console.log('[Global Metronome] Stopping metronome');
       this.loopController.stopGlobalSyncMetronome();
     }
   }
@@ -694,6 +749,73 @@ export class YouTubeLoopPractice {
       }
     });
   }
+
+  // 카운트인 기능 임시 비활성화
+  // /**
+  //  * 세그먼트의 카운트인 설정을 토글합니다.
+  //  */
+  // private toggleCountIn(segmentId: string) {
+  //   if (!this.profile) return;
+  //
+  //   const segment = this.profile.segments.find(s => s.id === segmentId);
+  //   if (!segment) return;
+  //
+  //   segment.countInEnabled = !segment.countInEnabled;
+  //   this.saveProfileThrottled();
+  //
+  //   console.log(`카운트인 ${segment.countInEnabled ? '활성화' : '비활성화'}: ${segment.label}`);
+  // }
+
+  // /**
+  //  * 특정 세그먼트에 대해 카운트인을 실행합니다.
+  //  * Beat Sync 설정을 기반으로 1마디 카운트인 후 루프를 시작합니다.
+  //  */
+  // private executeCountIn(segmentId: string): void {
+  //   if (!this.loopController || !this.uiController || !this.profile) {
+  //     console.log('[Count-In] loopController, uiController 또는 profile이 없습니다.');
+  //     return;
+  //   }
+  //
+  //   // 이미 카운트인 중이면 취소하고 새 카운트인 시작
+  //   if (this.loopController.isCountInActive()) {
+  //     // 영상은 정지하지 않고 카운트인만 취소 (새 카운트인이 바로 시작됨)
+  //     this.loopController.cancelCountIn(false);
+  //     this.uiController.hideCountInDisplay();
+  //     // 취소 후 바로 새 카운트인 시작 (return 하지 않음)
+  //   }
+  //
+  //   // 카운트인 시작 시점에 카드 포커스 (시각적으로 어떤 루프에 대해 카운트인 중인지 표시)
+  //   this.profile.activeSegmentId = segmentId;
+  //   this.refreshUI();
+  //
+  //   // 카운트인 시작
+  //   this.loopController.startCountIn(
+  //     segmentId,
+  //     // onBeat 콜백: 각 박마다 UI 업데이트 (카운트인 모드 = 보라색)
+  //     (currentBeat, totalBeats) => {
+  //       this.uiController?.showCountInBeat(currentBeat, totalBeats, 'count-in');
+  //     },
+  //     // onComplete 콜백: 카운트인 완료 시 상태 업데이트
+  //     () => {
+  //       // 메트로놈이 계속 재생되는 경우 비트 네비게이션을 메트로놈 모드로 전환
+  //       // 그렇지 않으면 숨김
+  //       if (this.loopController?.isGlobalSyncMetronomeActive()) {
+  //         // 메트로놈 모드로 전환 (우드톤 색상) - 콜백은 이미 completeCountIn에서 복원됨
+  //         // 현재 비트 정보가 없으므로 다음 비트에서 업데이트됨
+  //       } else {
+  //         this.uiController?.hideCountInDisplay();
+  //       }
+  //
+  //       // profile의 activeSegmentId 확정 및 저장
+  //       if (this.profile) {
+  //         this.profile.activeSegmentId = segmentId;
+  //         this.saveProfileThrottled();
+  //       }
+  //
+  //       this.refreshUI();
+  //     }
+  //   );
+  // }
 
 
 
@@ -873,17 +995,47 @@ export class YouTubeLoopPractice {
       } else {
         // 영상이 정지 중이면 시작 지점으로 이동 후 재생
         console.log('jumpAndActivateSegment: 이미 활성화된 구간, 시작 지점으로 이동 후 재생');
+
+        // 카운트인 기능 임시 비활성화
+        // if (segment.countInEnabled) {
+        //   console.log('jumpAndActivateSegment: 카운트인 활성화됨, 카운트인 실행');
+        //   await this.executeCountIn(segmentId);
+        // } else {
         this.video.currentTime = segment.start;
         this.video.play().catch((error) => {
           console.error('jumpAndActivateSegment: 재생 실패:', error);
         });
+        // }
       }
     } else {
-      // 다른 구간을 활성화: 시작 지점으로 이동
-      console.log('jumpAndActivateSegment: 구간 활성화 및 시작 지점으로 이동:', segment.start);
+      // 다른 구간을 활성화
+      console.log('jumpAndActivateSegment: 구간 활성화');
       console.log('jumpAndActivateSegment: video.paused 상태:', this.video.paused);
-      this.video.currentTime = segment.start;
+      console.log('jumpAndActivateSegment: countInEnabled:', segment.countInEnabled);
+
+      // 카운트인 기능 임시 비활성화
+      // if (segment.countInEnabled) {
+      //   console.log('jumpAndActivateSegment: 카운트인 활성화됨, 카운트인 실행');
+      //   await this.executeCountIn(segmentId);
+      // } else {
+      // 카운트인 없이 바로 시작
+      // 중요: 먼저 루프를 활성화하여 메트로놈 범위를 새 루프로 설정한 후
+      // video.currentTime을 변경해야 함. 그렇지 않으면 메트로놈이 이전 루프 범위를
+      // 기준으로 점프를 감지하여 이전 루프 시작점으로 되돌아갈 수 있음.
+      const prevVideoTime = this.video.currentTime;
       this.activateSegment(segmentId);
+      this.video.currentTime = segment.start;
+      console.log('jumpAndActivateSegment: video.currentTime 변경:', {
+        before: prevVideoTime,
+        targetStart: segment.start,
+        after: this.video.currentTime
+      });
+
+      // 메트로놈이 실행 중이면 새 위치에서 resync (더블비트 방지)
+      // setProfile()에서는 video.currentTime이 아직 변경 전이므로 여기서 호출
+      if (this.loopController) {
+        this.loopController.resyncMetronomeIfRunning(segment.start);
+      }
 
       // 영상이 정지 상태면 재생 시작
       if (this.video.paused) {
@@ -894,6 +1046,7 @@ export class YouTubeLoopPractice {
       } else {
         console.log('jumpAndActivateSegment: 영상이 이미 재생 중이므로 play() 호출 안 함');
       }
+      // }
     }
   }
 
@@ -988,7 +1141,12 @@ export class YouTubeLoopPractice {
       start: newStart,
       end: newEnd,
       rate: safeDefaultRate,
-      label: newLabel
+      label: newLabel,
+      // Beat Sync 설정 상속
+      useGlobalSync: segment.useGlobalSync,
+      localTempo: segment.localTempo,
+      localTimeSignature: segment.localTimeSignature,
+      localMetronomeOffset: segment.localMetronomeOffset
     };
 
     // 기준 세그먼트 바로 다음 위치에 삽입
@@ -1022,7 +1180,12 @@ export class YouTubeLoopPractice {
       end: segment.end,
       rate: segment.rate,
       label: newLabel,
-      metronomeEnabled: segment.metronomeEnabled
+      metronomeEnabled: segment.metronomeEnabled,
+      // Beat Sync 설정 상속
+      useGlobalSync: segment.useGlobalSync,
+      localTempo: segment.localTempo,
+      localTimeSignature: segment.localTimeSignature,
+      localMetronomeOffset: segment.localMetronomeOffset
     };
 
     // 기준 세그먼트 바로 다음 위치에 삽입
@@ -1035,6 +1198,131 @@ export class YouTubeLoopPractice {
 
     // 생성된 카드로 스크롤
     this.scrollToSegment(newSegment.id);
+  }
+
+  /**
+   * 세그먼트의 start/end 시간을 가장 가까운 박으로 양자화합니다.
+   * 세그먼트의 로컬 설정이 있으면 로컬, 없으면 글로벌 설정을 사용합니다.
+   */
+  private quantizeSegment(segmentId: string) {
+    if (!this.profile) return;
+
+    const segment = this.profile.segments.find(s => s.id === segmentId);
+    if (!segment) return;
+
+    // 유효 Beat Sync 설정 가져오기
+    const effectiveSync = this.getEffectiveSync(segment);
+
+    // BPM이 설정되지 않으면 양자화 불가
+    // (UI에서 Beat Sync가 완료되지 않으면 Quantize 메뉴가 표시되지 않으므로 여기 도달하지 않음)
+    if (!effectiveSync.tempo) {
+      console.warn('양자화 실패: BPM이 설정되지 않음');
+      return;
+    }
+
+    const bpm = effectiveSync.tempo;
+    const offset = effectiveSync.offset || 0;
+    const beatDuration = 60 / bpm; // 1박 길이 (초)
+
+    // 가장 가까운 박으로 스냅하는 함수
+    const quantizeTime = (time: number): number => {
+      // offset 기준으로 상대 시간 계산
+      const relativeTime = time - offset;
+      // 가장 가까운 박 번호 (반올림)
+      const nearestBeatNumber = Math.round(relativeTime / beatDuration);
+      // 양자화된 절대 시간
+      return offset + (nearestBeatNumber * beatDuration);
+    };
+
+    const quantizedStart = quantizeTime(segment.start);
+    let quantizedEnd = quantizeTime(segment.end);
+
+    // 양자화 후 start >= end가 되면 end를 최소 1박 뒤로 이동
+    if (quantizedEnd <= quantizedStart) {
+      quantizedEnd = quantizedStart + beatDuration;
+    }
+
+    // 음수 시간 방지
+    const finalStart = Math.max(0, quantizedStart);
+    const finalEnd = Math.max(finalStart + beatDuration, quantizedEnd);
+
+    this.updateSegment(segmentId, {
+      start: finalStart,
+      end: finalEnd
+    });
+
+    console.log(`세그먼트 양자화: ${segment.label}`, {
+      before: { start: segment.start.toFixed(3), end: segment.end.toFixed(3) },
+      after: { start: finalStart.toFixed(3), end: finalEnd.toFixed(3) },
+      bpm,
+      beatDuration: beatDuration.toFixed(3)
+    });
+  }
+
+  /**
+   * 세그먼트의 Beat Sync 설정을 업데이트합니다.
+   */
+  private updateSegmentSync(segmentId: string, data: {
+    useGlobalSync?: boolean;
+    localTempo?: number;
+    localTimeSignature?: string;
+    localMetronomeOffset?: number;
+  }) {
+    if (!this.profile) return;
+
+    const segment = this.profile.segments.find(s => s.id === segmentId);
+    if (!segment) return;
+
+    // 설정 업데이트
+    segment.useGlobalSync = data.useGlobalSync;
+
+    if (data.useGlobalSync) {
+      // 글로벌 설정 사용 시 로컬 설정 제거
+      delete segment.localTempo;
+      delete segment.localTimeSignature;
+      delete segment.localMetronomeOffset;
+    } else {
+      // 로컬 설정 저장
+      segment.localTempo = data.localTempo;
+      segment.localTimeSignature = data.localTimeSignature as any;
+      segment.localMetronomeOffset = data.localMetronomeOffset;
+    }
+
+    // 프로필 저장
+    this.saveProfile();
+
+    console.log(`세그먼트 Beat Sync 업데이트: ${segment.label}`, {
+      useGlobalSync: segment.useGlobalSync,
+      localTempo: segment.localTempo,
+      localTimeSignature: segment.localTimeSignature,
+      localMetronomeOffset: segment.localMetronomeOffset
+    });
+  }
+
+  /**
+   * 세그먼트의 유효 Beat Sync 설정을 반환합니다.
+   * 로컬 설정이 있으면 로컬, 없으면 글로벌 설정을 반환합니다.
+   */
+  private getEffectiveSync(segment: LoopSegment): {
+    tempo: number | undefined;
+    timeSignature: string | undefined;
+    offset: number | undefined;
+  } {
+    if (segment.useGlobalSync !== false) {
+      // 글로벌 설정 사용
+      return {
+        tempo: this.profile?.tempo,
+        timeSignature: this.profile?.timeSignature,
+        offset: this.profile?.globalMetronomeOffset
+      };
+    } else {
+      // 로컬 설정 사용
+      return {
+        tempo: segment.localTempo,
+        timeSignature: segment.localTimeSignature,
+        offset: segment.localMetronomeOffset
+      };
+    }
   }
 
   /**

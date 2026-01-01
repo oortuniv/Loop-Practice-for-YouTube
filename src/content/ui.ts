@@ -142,4 +142,18 @@ export class YouTubeUI {
   isAttached(): boolean {
     return !!(this.container && document.body.contains(this.container));
   }
+
+  /**
+   * Shadow DOM에 요소를 추가합니다.
+   */
+  appendChild(element: HTMLElement): void {
+    this.shadowRoot?.appendChild(element);
+  }
+
+  /**
+   * Shadow DOM에서 ID로 요소를 찾습니다.
+   */
+  getElementById(id: string): HTMLElement | null {
+    return this.shadowRoot?.getElementById(id) || null;
+  }
 }
