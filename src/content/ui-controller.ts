@@ -2418,6 +2418,11 @@ export class UIController {
 
   /**
    * Tap Tempo 버튼 클릭 처리
+   *
+   * 개선된 알고리즘:
+   * 1. 더블 클릭 필터: 50ms 이하 간격 무시 (실수로 인한 더블 클릭 방지)
+   * 2. 가중치 평균: 최근 탭에 높은 가중치 부여 (안정성 향상)
+   * 3. 이상치 리셋: 평균에서 ±50% 벗어나면 새 템포로 인식 (REAPER 스타일)
    */
   private tapTimes: number[] = [];
   private handleTapTempo() {
@@ -2426,6 +2431,25 @@ export class UIController {
     // 마지막 탭으로부터 2초 이상 지났으면 리셋
     if (this.tapTimes.length > 0 && now - this.tapTimes[this.tapTimes.length - 1] > 2000) {
       this.tapTimes = [];
+    }
+
+    // 더블 클릭 필터: 50ms 이하 간격 무시 (1200 BPM 이상은 비현실적)
+    if (this.tapTimes.length > 0) {
+      const lastInterval = now - this.tapTimes[this.tapTimes.length - 1];
+      if (lastInterval < 50) {
+        return; // 너무 빠른 탭은 무시
+      }
+    }
+
+    // 이상치 리셋 (REAPER 스타일): 현재 평균에서 ±50% 벗어나면 새 템포로 인식
+    if (this.tapTimes.length >= 2) {
+      const lastInterval = now - this.tapTimes[this.tapTimes.length - 1];
+      const currentAvgInterval = this.calculateCurrentAverageInterval();
+
+      // 새 간격이 현재 평균의 50% 미만이거나 150% 초과면 리셋
+      if (lastInterval < currentAvgInterval * 0.5 || lastInterval > currentAvgInterval * 1.5) {
+        this.tapTimes = []; // 완전히 새로운 템포 시작
+      }
     }
 
     this.tapTimes.push(now);
@@ -2440,13 +2464,18 @@ export class UIController {
       this.tapTimes.shift();
     }
 
-    // 평균 간격 계산
+    // 간격 계산
     const intervals: number[] = [];
     for (let i = 1; i < this.tapTimes.length; i++) {
       intervals.push(this.tapTimes[i] - this.tapTimes[i - 1]);
     }
 
-    const avgInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+    // 가중치 평균: 최근 탭일수록 높은 가중치 (1, 2, 3, ... n)
+    const weights = intervals.map((_, i) => i + 1);
+    const weightedSum = intervals.reduce((sum, interval, i) => sum + interval * weights[i], 0);
+    const totalWeight = weights.reduce((a, b) => a + b, 0);
+    const avgInterval = weightedSum / totalWeight;
+
     const bpm = Math.round(60000 / avgInterval);
 
     // BPM 범위 제한
@@ -2459,6 +2488,20 @@ export class UIController {
     }
 
     this.onCommand?.('update-tempo', { tempo: clampedBpm });
+  }
+
+  /**
+   * 현재 탭 간격의 평균 계산 (이상치 감지용)
+   */
+  private calculateCurrentAverageInterval(): number {
+    if (this.tapTimes.length < 2) return 0;
+
+    const intervals: number[] = [];
+    for (let i = 1; i < this.tapTimes.length; i++) {
+      intervals.push(this.tapTimes[i] - this.tapTimes[i - 1]);
+    }
+
+    return intervals.reduce((a, b) => a + b, 0) / intervals.length;
   }
 
   /**

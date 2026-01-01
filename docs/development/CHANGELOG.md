@@ -6,6 +6,15 @@
 
 ## [Unreleased]
 
+### 2026-01-01 (Session 02 - TAP Tempo Algorithm Improvements)
+
+#### Changed
+- 🔄 **TAP Tempo 알고리즘 고도화**
+  - 더블 클릭 필터: 50ms 이하 간격 무시 (실수로 인한 더블 클릭 방지)
+  - 가중치 평균: 최근 탭에 높은 가중치 부여 (안정성 향상)
+  - 이상치 리셋: 평균에서 ±50% 벗어나면 새 템포로 인식 (REAPER 스타일)
+  - 파일: `src/content/ui-controller.ts:handleTapTempo()`
+
 ### 2026-01-01 (Session 01 - Loop UX Improvements)
 
 #### Added
