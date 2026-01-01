@@ -5,6 +5,7 @@ export type LoopSegment = {
   rate: number;
   label?: string;
   metronomeEnabled?: boolean;  // 이 루프에서 메트로놈 활성화 여부
+  countInEnabled?: boolean;    // 이 루프에서 카운트인 활성화 여부
 
   // 로컬 Beat Sync 설정 (없거나 useGlobalSync가 true면 글로벌 설정 사용)
   useGlobalSync?: boolean;           // 기본값: true (글로벌 설정 사용)

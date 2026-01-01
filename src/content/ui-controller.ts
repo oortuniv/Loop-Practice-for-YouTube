@@ -135,6 +135,20 @@ export class UIController {
   }
 
   /**
+   * 세그먼트가 유효한 Beat Sync 설정을 가지고 있는지 확인합니다.
+   * (글로벌 또는 로컬 설정이 있으면 true)
+   */
+  private hasEffectiveSync(segment: LoopSegment): boolean {
+    if (segment.useGlobalSync !== false) {
+      // 글로벌 설정 사용
+      return !!(this.profile?.tempo && this.profile?.timeSignature);
+    } else {
+      // 로컬 설정 사용
+      return !!(segment.localTempo && segment.localTimeSignature);
+    }
+  }
+
+  /**
    * 메트로놈 버튼의 툴팁 텍스트를 반환합니다.
    */
   private getMetronomeTooltip(isLoopActive: boolean): string {
@@ -216,6 +230,14 @@ export class UIController {
             <h1>Loop Practice for YouTube</h1>
           </div>
           <div class="loop-count">${this.profile.segments.length} loops</div>
+        </div>
+
+        <!-- Count-In Display -->
+        <div class="count-in-display" id="countInDisplay" style="display: none;">
+          <span class="count-beat" data-beat="1">1</span>
+          <span class="count-beat" data-beat="2">2</span>
+          <span class="count-beat" data-beat="3">3</span>
+          <span class="count-beat" data-beat="4">4</span>
         </div>
 
         <div class="panel-content" style="display: ${this.isCollapsed ? 'none' : 'block'}">
@@ -487,10 +509,17 @@ export class UIController {
           <div class="segment-actions">
             <div class="action-buttons-vertical">
               <button class="btn btn-loop ${isActive ? 'active' : ''}" data-segment-id="${segment.id}" data-action="jump-and-activate" title="Activate loop">
-                <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
                   <path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/>
                 </svg>
               </button>
+              <!-- 카운트인 버튼 임시 숨김 (로직은 유지) -->
+              <!--
+              <button class="btn btn-count-in ${segment.countInEnabled ? 'active' : ''}" data-segment-id="${segment.id}" data-action="toggle-count-in" title="Count-in (1 bar before loop)"
+                      ${!this.hasEffectiveSync(segment) ? 'disabled' : ''}>
+                <span class="count-in-label">1234</span>
+              </button>
+              -->
               <!-- 메트로놈 버튼 임시 숨김 (로직은 유지) -->
               <!--
               <button class="btn btn-metronome ${this.isMetronomeActive(segment.id) ? 'active' : ''}"
@@ -961,13 +990,13 @@ export class UIController {
       }
 
       .btn-metronome-toggle.active {
-        background: ${this.isDarkTheme ? '#1a3a5c' : '#e3f2fd'};
-        border-color: #2196f3;
-        color: ${this.isDarkTheme ? '#90caf9' : '#1976d2'};
+        background: ${this.isDarkTheme ? '#3d3020' : '#f5f0e8'};
+        border-color: #8B6F47;
+        color: ${this.isDarkTheme ? '#d4a574' : '#6b5330'};
       }
 
       .btn-metronome-toggle.active:hover {
-        background: ${this.isDarkTheme ? '#1e4a6f' : '#bbdefb'};
+        background: ${this.isDarkTheme ? '#4a3a28' : '#ebe5d8'};
       }
 
       .metronome-icon {
@@ -1010,7 +1039,7 @@ export class UIController {
         appearance: none;
         width: 12px;
         height: 12px;
-        background: #2196f3;
+        background: #8B6F47;
         border-radius: 50%;
         cursor: pointer;
       }
@@ -1018,7 +1047,7 @@ export class UIController {
       .volume-slider::-moz-range-thumb {
         width: 12px;
         height: 12px;
-        background: #2196f3;
+        background: #8B6F47;
         border-radius: 50%;
         cursor: pointer;
         border: none;
@@ -1121,10 +1150,10 @@ export class UIController {
         display: flex;
         align-items: center;
         justify-content: center;
-        padding: 12px;
+        padding: 8px;
         border-radius: 8px;
         width: 100%;
-        height: 100%;
+        flex: 1;
         min-width: 48px;
       }
 
@@ -1140,6 +1169,80 @@ export class UIController {
 
       .btn-loop svg {
         display: block;
+      }
+
+      .btn-count-in {
+        background: ${this.isDarkTheme ? '#3f3f3f' : '#f9f9f9'};
+        color: ${textSecondary};
+        border: 1px solid ${borderColor};
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 6px;
+        border-radius: 6px;
+        width: 100%;
+        min-width: 48px;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 1px;
+      }
+
+      .btn-count-in:hover:not(:disabled) {
+        background: ${this.isDarkTheme ? '#4f4f4f' : '#f2f2f2'};
+      }
+
+      .btn-count-in:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+
+      .btn-count-in.active {
+        background: ${this.isDarkTheme ? '#4a3a6b' : '#ede7f6'};
+        color: ${this.isDarkTheme ? '#ce93d8' : '#7b1fa2'};
+        border-color: #9c27b0;
+      }
+
+      .btn-count-in .count-in-label {
+        font-family: 'Roboto Mono', monospace;
+      }
+
+      /* Count-In Display */
+      .count-in-display {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: 16px;
+        padding: 16px;
+        background: ${this.isDarkTheme ? '#1a1a1a' : '#f0f0f0'};
+        border-bottom: 1px solid ${borderColor};
+      }
+
+      .count-beat {
+        font-size: 28px;
+        font-weight: 700;
+        color: ${textSecondary};
+        opacity: 0.4;
+        transition: all 0.1s ease;
+        font-family: 'Roboto Mono', monospace;
+        width: 40px;
+        height: 40px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 50%;
+      }
+
+      .count-beat.active {
+        color: ${this.isDarkTheme ? '#ce93d8' : '#7b1fa2'};
+        opacity: 1;
+        transform: scale(1.3);
+        background: ${this.isDarkTheme ? '#4a3a6b' : '#ede7f6'};
+      }
+
+      /* Metronome mode (wood tone) */
+      .count-in-display.metronome-mode .count-beat.active {
+        color: ${this.isDarkTheme ? '#d4a574' : '#8b5a2b'};
+        background: ${this.isDarkTheme ? '#4a3928' : '#f5e6d3'};
       }
 
       .segments-list {
@@ -2221,6 +2324,10 @@ export class UIController {
       case 'add-8-bars':
         console.log('add-8-bars 액션 실행');
         this.onCommand?.('add-8-bars', { segmentId });
+        break;
+      case 'toggle-count-in':
+        console.log('toggle-count-in 액션 실행');
+        this.onCommand?.('toggle-count-in', { segmentId });
         break;
       default:
         console.warn('알 수 없는 액션:', action);
@@ -4418,6 +4525,60 @@ export class UIController {
   }
 
   // ========== End Beat Sync Modal Methods ==========
+
+  // ========== Count-In Methods ==========
+
+  /**
+   * 카운트인/메트로놈 비트 표시를 업데이트합니다.
+   * @param currentBeat 현재 박 (1-indexed)
+   * @param totalBeats 총 박 수
+   * @param mode 표시 모드 ('count-in' = 보라색, 'metronome' = 우드톤)
+   */
+  showCountInBeat(currentBeat: number, totalBeats: number, mode: 'count-in' | 'metronome' = 'count-in'): void {
+    const display = this.ui.querySelector('#countInDisplay') as HTMLElement;
+    if (!display) return;
+
+    // 표시 영역 보이기
+    display.style.display = 'flex';
+
+    // 모드에 따라 클래스 설정
+    if (mode === 'metronome') {
+      display.classList.add('metronome-mode');
+    } else {
+      display.classList.remove('metronome-mode');
+    }
+
+    // 박자표에 맞게 beat 요소 업데이트
+    display.innerHTML = '';
+    for (let i = 1; i <= totalBeats; i++) {
+      const beatElement = document.createElement('span');
+      beatElement.className = `count-beat${i === currentBeat ? ' active' : ''}`;
+      beatElement.dataset.beat = String(i);
+      beatElement.textContent = String(i);
+      display.appendChild(beatElement);
+    }
+  }
+
+  /**
+   * 카운트인/메트로놈 표시를 숨깁니다.
+   */
+  hideCountInDisplay(): void {
+    const display = this.ui.querySelector('#countInDisplay') as HTMLElement;
+    if (!display) return;
+
+    display.style.display = 'none';
+    display.classList.remove('metronome-mode');
+
+    // 기본 4박으로 리셋
+    display.innerHTML = `
+      <span class="count-beat" data-beat="1">1</span>
+      <span class="count-beat" data-beat="2">2</span>
+      <span class="count-beat" data-beat="3">3</span>
+      <span class="count-beat" data-beat="4">4</span>
+    `;
+  }
+
+  // ========== End Count-In Methods ==========
 
   /**
    * UI를 정리합니다.

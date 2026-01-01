@@ -367,6 +367,11 @@ export class YouTubeLoopPractice {
           this.add8BarsAfterSegment(data?.segmentId);
           this.refreshUI();
           break;
+        // 카운트인 기능 임시 비활성화
+        // case 'toggle-count-in':
+        //   this.toggleCountIn(data?.segmentId);
+        //   this.refreshUI();
+        //   break;
         default:
           console.warn('Unknown UI command:', command);
       }
@@ -679,11 +684,20 @@ export class YouTubeLoopPractice {
     console.log('[Global Metronome] Toggle:', { enabled, videoTime: this.video?.currentTime });
 
     if (enabled) {
+      // 비트 콜백 설정 (UI 업데이트용)
+      this.loopController.setMetronomeBeatCallback((beat, total) => {
+        this.uiController?.showCountInBeat(beat, total, 'metronome');
+      });
+
       // 메트로놈 활성화
       if (this.video && !this.video.paused) {
         this.loopController.startGlobalSyncMetronome();
       }
     } else {
+      // 비트 콜백 해제
+      this.loopController.setMetronomeBeatCallback(null);
+      this.uiController?.hideCountInDisplay();
+
       // 메트로놈 비활성화
       console.log('[Global Metronome] Stopping metronome');
       this.loopController.stopGlobalSyncMetronome();
@@ -735,6 +749,73 @@ export class YouTubeLoopPractice {
       }
     });
   }
+
+  // 카운트인 기능 임시 비활성화
+  // /**
+  //  * 세그먼트의 카운트인 설정을 토글합니다.
+  //  */
+  // private toggleCountIn(segmentId: string) {
+  //   if (!this.profile) return;
+  //
+  //   const segment = this.profile.segments.find(s => s.id === segmentId);
+  //   if (!segment) return;
+  //
+  //   segment.countInEnabled = !segment.countInEnabled;
+  //   this.saveProfileThrottled();
+  //
+  //   console.log(`카운트인 ${segment.countInEnabled ? '활성화' : '비활성화'}: ${segment.label}`);
+  // }
+
+  // /**
+  //  * 특정 세그먼트에 대해 카운트인을 실행합니다.
+  //  * Beat Sync 설정을 기반으로 1마디 카운트인 후 루프를 시작합니다.
+  //  */
+  // private executeCountIn(segmentId: string): void {
+  //   if (!this.loopController || !this.uiController || !this.profile) {
+  //     console.log('[Count-In] loopController, uiController 또는 profile이 없습니다.');
+  //     return;
+  //   }
+  //
+  //   // 이미 카운트인 중이면 취소하고 새 카운트인 시작
+  //   if (this.loopController.isCountInActive()) {
+  //     // 영상은 정지하지 않고 카운트인만 취소 (새 카운트인이 바로 시작됨)
+  //     this.loopController.cancelCountIn(false);
+  //     this.uiController.hideCountInDisplay();
+  //     // 취소 후 바로 새 카운트인 시작 (return 하지 않음)
+  //   }
+  //
+  //   // 카운트인 시작 시점에 카드 포커스 (시각적으로 어떤 루프에 대해 카운트인 중인지 표시)
+  //   this.profile.activeSegmentId = segmentId;
+  //   this.refreshUI();
+  //
+  //   // 카운트인 시작
+  //   this.loopController.startCountIn(
+  //     segmentId,
+  //     // onBeat 콜백: 각 박마다 UI 업데이트 (카운트인 모드 = 보라색)
+  //     (currentBeat, totalBeats) => {
+  //       this.uiController?.showCountInBeat(currentBeat, totalBeats, 'count-in');
+  //     },
+  //     // onComplete 콜백: 카운트인 완료 시 상태 업데이트
+  //     () => {
+  //       // 메트로놈이 계속 재생되는 경우 비트 네비게이션을 메트로놈 모드로 전환
+  //       // 그렇지 않으면 숨김
+  //       if (this.loopController?.isGlobalSyncMetronomeActive()) {
+  //         // 메트로놈 모드로 전환 (우드톤 색상) - 콜백은 이미 completeCountIn에서 복원됨
+  //         // 현재 비트 정보가 없으므로 다음 비트에서 업데이트됨
+  //       } else {
+  //         this.uiController?.hideCountInDisplay();
+  //       }
+  //
+  //       // profile의 activeSegmentId 확정 및 저장
+  //       if (this.profile) {
+  //         this.profile.activeSegmentId = segmentId;
+  //         this.saveProfileThrottled();
+  //       }
+  //
+  //       this.refreshUI();
+  //     }
+  //   );
+  // }
 
 
 
@@ -914,15 +995,30 @@ export class YouTubeLoopPractice {
       } else {
         // 영상이 정지 중이면 시작 지점으로 이동 후 재생
         console.log('jumpAndActivateSegment: 이미 활성화된 구간, 시작 지점으로 이동 후 재생');
+
+        // 카운트인 기능 임시 비활성화
+        // if (segment.countInEnabled) {
+        //   console.log('jumpAndActivateSegment: 카운트인 활성화됨, 카운트인 실행');
+        //   await this.executeCountIn(segmentId);
+        // } else {
         this.video.currentTime = segment.start;
         this.video.play().catch((error) => {
           console.error('jumpAndActivateSegment: 재생 실패:', error);
         });
+        // }
       }
     } else {
-      // 다른 구간을 활성화: 시작 지점으로 이동
-      console.log('jumpAndActivateSegment: 구간 활성화 및 시작 지점으로 이동:', segment.start);
+      // 다른 구간을 활성화
+      console.log('jumpAndActivateSegment: 구간 활성화');
       console.log('jumpAndActivateSegment: video.paused 상태:', this.video.paused);
+      console.log('jumpAndActivateSegment: countInEnabled:', segment.countInEnabled);
+
+      // 카운트인 기능 임시 비활성화
+      // if (segment.countInEnabled) {
+      //   console.log('jumpAndActivateSegment: 카운트인 활성화됨, 카운트인 실행');
+      //   await this.executeCountIn(segmentId);
+      // } else {
+      // 카운트인 없이 바로 시작
       this.video.currentTime = segment.start;
       this.activateSegment(segmentId);
 
@@ -935,6 +1031,7 @@ export class YouTubeLoopPractice {
       } else {
         console.log('jumpAndActivateSegment: 영상이 이미 재생 중이므로 play() 호출 안 함');
       }
+      // }
     }
   }
 
