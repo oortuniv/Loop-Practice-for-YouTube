@@ -27,6 +27,15 @@ export class UIController {
   private tapSyncScore: number = 0; // 0-100 점수
   private tapSyncLastResetTime: number = 0; // 마지막 리셋 시간
 
+  // 점수를 표시하기 위한 최소 탭 수 (표본이 적으면 점수 신뢰도가 낮음)
+  private readonly TAP_SYNC_MIN_SAMPLES = 6;
+
+  // Beat Sync 모달 관련 상태
+  private localTapSyncCurrentBeat: number = 0; // 로컬 TAP Sync 현재 박자
+  private localTapSyncHistory: Array<{ beatNumber: number; tappedTime: number; calculatedOffset: number }> = [];
+  private localTapSyncScore: number = 0;
+  private localTapSyncLastResetTime: number = 0;
+
   constructor() {
     this.ui = new YouTubeUI();
     this.detectTheme();
@@ -307,8 +316,9 @@ export class UIController {
       : 'TAP';
 
     // 점수에 따른 색상 (신호등 색깔)
-    const scoreColor = this.getScoreColor(this.tapSyncScore);
     const tapCount = this.tapSyncHistory.length;
+    const hasEnoughSamples = tapCount >= this.TAP_SYNC_MIN_SAMPLES;
+    const scoreColor = hasEnoughSamples ? this.getScoreColor(this.tapSyncScore) : '#f44336'; // 표본 부족 시 빨간색
 
     return `
       <div class="setting-group tap-sync-group" ${!isEnabled ? 'style="display: none;"' : ''}>
@@ -323,8 +333,8 @@ export class UIController {
               ${currentBeatDisplay}
             </button>
             ${tapCount > 0 ? `
-              <div class="tap-sync-score" style="color: ${scoreColor};" title="Sync accuracy (${tapCount} taps)">
-                ${tapCount >= 2 ? `${this.tapSyncScore}%` : '...'}
+              <div class="tap-sync-score" style="color: ${scoreColor};" title="Sync accuracy (${tapCount}/${this.TAP_SYNC_MIN_SAMPLES} taps)">
+                ${hasEnoughSamples ? `${this.tapSyncScore}%` : '--%'}
               </div>
             ` : `
               <span class="tap-sync-hint">← Tap along</span>
@@ -434,6 +444,8 @@ export class UIController {
             </button>
             <div class="menu-dropdown" data-segment-id="${segment.id}" style="display: none;">
               <button class="menu-item" data-segment-id="${segment.id}" data-action="duplicate">Duplicate</button>
+              <button class="menu-item" data-segment-id="${segment.id}" data-action="open-beat-sync">Beat Sync</button>
+              <button class="menu-item" data-segment-id="${segment.id}" data-action="quantize">Quantize</button>
               <button class="menu-item menu-delete" data-segment-id="${segment.id}" data-action="delete">Delete</button>
             </div>
           </div>
@@ -2164,6 +2176,16 @@ export class UIController {
         this.closeAllMenus();
         this.onCommand?.('duplicate-segment', { segmentId });
         break;
+      case 'quantize':
+        console.log('quantize 액션 실행');
+        this.closeAllMenus();
+        this.onCommand?.('quantize-segment', { segmentId });
+        break;
+      case 'open-beat-sync':
+        console.log('open-beat-sync 액션 실행');
+        this.closeAllMenus();
+        this.openBeatSyncModal(segmentId);
+        break;
       case 'toggle-menu':
         console.log('toggle-menu 액션 실행');
         this.toggleMenu(segmentId);
@@ -3251,29 +3273,69 @@ export class UIController {
     const stdDev = Math.sqrt(varianceSum / offsets.length);
     const stdDevMs = stdDev * 1000; // ms로 변환
 
+    // === 1. 일관성 점수 (기존 로직) ===
     // 비선형 점수 계산 (인간 청각 인지 기반)
     // 15ms 이하: 90-100% (매우 정밀, 프로 수준)
     // 25ms: 80% (좋음, 인지 불가 수준)
     // 40ms: 50% (보통, 약간 느껴짐)
     // 60ms+: 0% (부정확, 명확히 어긋남)
-    let score: number;
+    let consistencyScore: number;
     if (stdDevMs <= 15) {
-      // 0-15ms: 90-100점 (선형)
-      score = 90 + (1 - stdDevMs / 15) * 10;
+      consistencyScore = 90 + (1 - stdDevMs / 15) * 10;
     } else if (stdDevMs <= 25) {
-      // 15-25ms: 80-90점 (선형)
-      score = 80 + (1 - (stdDevMs - 15) / 10) * 10;
+      consistencyScore = 80 + (1 - (stdDevMs - 15) / 10) * 10;
     } else if (stdDevMs <= 40) {
-      // 25-40ms: 50-80점 (선형)
-      score = 50 + (1 - (stdDevMs - 25) / 15) * 30;
+      consistencyScore = 50 + (1 - (stdDevMs - 25) / 15) * 30;
     } else if (stdDevMs <= 60) {
-      // 40-60ms: 0-50점 (선형)
-      score = (1 - (stdDevMs - 40) / 20) * 50;
+      consistencyScore = (1 - (stdDevMs - 40) / 20) * 50;
     } else {
-      score = 0;
+      consistencyScore = 0;
     }
 
-    return { averageOffset, score: Math.round(score) };
+    // === 2. 템포 정확도 점수 (신규) ===
+    // 탭 간격을 분석하여 실제 BPM과 설정된 BPM 비교
+    let tempoScore = 100;
+    if (this.tapSyncHistory.length >= 3 && this.profile?.tempo) {
+      const tappedTimes = this.tapSyncHistory.map(t => t.tappedTime);
+      const intervals: number[] = [];
+      for (let i = 1; i < tappedTimes.length; i++) {
+        intervals.push(tappedTimes[i] - tappedTimes[i - 1]);
+      }
+
+      // 평균 탭 간격 (초)
+      const avgInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+
+      // 설정된 BPM 기준 beat 간격 (초)
+      const expectedBeatDuration = 60 / this.profile.tempo;
+
+      // 템포 오차율 계산 (%)
+      // avgInterval이 expectedBeatDuration과 얼마나 차이나는지
+      const tempoErrorPercent = Math.abs(avgInterval - expectedBeatDuration) / expectedBeatDuration * 100;
+
+      // 템포 정확도 점수 계산
+      // 0-2%: 100점 (거의 완벽)
+      // 2-5%: 80-100점 (좋음)
+      // 5-10%: 50-80점 (보통)
+      // 10-15%: 20-50점 (부정확)
+      // 15%+: 0-20점 (많이 벗어남)
+      if (tempoErrorPercent <= 2) {
+        tempoScore = 100;
+      } else if (tempoErrorPercent <= 5) {
+        tempoScore = 80 + (1 - (tempoErrorPercent - 2) / 3) * 20;
+      } else if (tempoErrorPercent <= 10) {
+        tempoScore = 50 + (1 - (tempoErrorPercent - 5) / 5) * 30;
+      } else if (tempoErrorPercent <= 15) {
+        tempoScore = 20 + (1 - (tempoErrorPercent - 10) / 5) * 30;
+      } else {
+        tempoScore = Math.max(0, 20 - (tempoErrorPercent - 15) * 2);
+      }
+    }
+
+    // === 3. 최종 점수: 일관성 70% + 템포 정확도 30% ===
+    // 일관성이 더 중요하지만, 템포가 많이 벗어나면 감점
+    const finalScore = consistencyScore * 0.7 + tempoScore * 0.3;
+
+    return { averageOffset, score: Math.round(finalScore) };
   }
 
   /**
@@ -3734,6 +3796,628 @@ export class UIController {
       }
     }
   }
+
+  // ========== Beat Sync Modal Methods ==========
+
+  /**
+   * Beat Sync 모달을 엽니다.
+   */
+  private openBeatSyncModal(segmentId: string) {
+    const segment = this.profile?.segments.find(s => s.id === segmentId);
+    if (!segment) return;
+
+    this.resetLocalTapSync();
+
+    // 모달 HTML 생성 및 추가
+    const modalHTML = this.getBeatSyncModalHTML(segment);
+    const modalContainer = document.createElement('div');
+    modalContainer.id = 'beat-sync-modal-container';
+    modalContainer.innerHTML = modalHTML;
+
+    // YouTube 테마 감지 및 적용 (html[dark] 속성 확인)
+    const isDarkMode = document.documentElement.hasAttribute('dark');
+    if (!isDarkMode) {
+      modalContainer.classList.add('light-theme');
+    }
+
+    this.ui.appendChild(modalContainer);
+
+    // 이벤트 리스너 설정
+    this.setupBeatSyncModalEvents(segment);
+  }
+
+  /**
+   * Beat Sync 모달을 닫습니다.
+   */
+  private closeBeatSyncModal() {
+    const modalContainer = this.ui.getElementById('beat-sync-modal-container');
+    if (modalContainer) {
+      modalContainer.remove();
+    }
+    this.resetLocalTapSync();
+  }
+
+  /**
+   * 로컬 TAP Sync 상태를 초기화합니다.
+   */
+  private resetLocalTapSync() {
+    this.localTapSyncCurrentBeat = 0;
+    this.localTapSyncHistory = [];
+    this.localTapSyncScore = 0;
+    this.localTapSyncLastResetTime = 0;
+  }
+
+  /**
+   * Beat Sync 모달 HTML을 생성합니다.
+   */
+  private getBeatSyncModalHTML(segment: LoopSegment): string {
+    const useCustom = segment.useGlobalSync === false; // 커스텀 설정 사용 여부
+    const localTempo = segment.localTempo || this.profile?.tempo || 120;
+    const localTimeSignature = segment.localTimeSignature || this.profile?.timeSignature || '4/4';
+    const localOffset = segment.localMetronomeOffset;
+    const hasLocalOffset = typeof localOffset === 'number';
+
+    const timeSignatures = ['2/4', '3/4', '4/4', '5/4', '3/8', '6/8', '7/8', '9/8', '12/8', '6/4'];
+
+    return `
+      <div class="beat-sync-modal-overlay">
+        <div class="beat-sync-modal">
+          <div class="beat-sync-modal-header">
+            <h3>Beat Sync - ${segment.label || 'Loop'}</h3>
+            <button class="beat-sync-modal-close" id="beatSyncModalClose">&times;</button>
+          </div>
+          <div class="beat-sync-modal-body">
+            <div class="beat-sync-global-toggle">
+              <label class="checkbox-label">
+                <input type="checkbox" id="useCustomSyncCheckbox" ${useCustom ? 'checked' : ''}>
+                <span>Use custom settings</span>
+              </label>
+            </div>
+
+            <div class="beat-sync-local-settings" id="localSettingsSection" style="${useCustom ? '' : 'opacity: 0.5; pointer-events: none;'}">
+              <div class="setting-row">
+                <label>BPM:</label>
+                <input type="text" id="localTempoInput" class="tempo-input" value="${localTempo}" ${useCustom ? '' : 'disabled'}>
+              </div>
+
+              <div class="setting-row">
+                <label>Time Signature:</label>
+                <select id="localTimeSignature" ${useCustom ? '' : 'disabled'}>
+                  ${timeSignatures.map(ts => `<option value="${ts}" ${ts === localTimeSignature ? 'selected' : ''}>${ts}</option>`).join('')}
+                </select>
+              </div>
+
+              <div class="setting-row tap-sync-section">
+                <label>Beat Sync:</label>
+                <div class="tap-sync-controls-modal">
+                  <button class="btn btn-tap-sync-modal" id="localTapSyncBtn" ${useCustom ? '' : 'disabled'}>
+                    TAP
+                  </button>
+                  <div class="tap-sync-score-modal" id="localTapSyncScore" style="display: none;">
+                    --%
+                  </div>
+                </div>
+              </div>
+
+              <div class="setting-row" id="localSyncResultRow">
+                <label>1st Beat:</label>
+                <span class="sync-result-value" id="localSyncResult">${hasLocalOffset ? this.formatSyncTime(localOffset!) : '--'}</span>
+                <div class="fine-tune-buttons">
+                  <button class="btn-fine-tune" id="localSyncMinus10" ${useCustom ? '' : 'disabled'}>-10</button>
+                  <button class="btn-fine-tune" id="localSyncMinus1" ${useCustom ? '' : 'disabled'}>-1</button>
+                  <button class="btn-fine-tune" id="localSyncPlus1" ${useCustom ? '' : 'disabled'}>+1</button>
+                  <button class="btn-fine-tune" id="localSyncPlus10" ${useCustom ? '' : 'disabled'}>+10</button>
+                  <button class="btn-fine-tune btn-clear" id="localSyncClear" ${useCustom ? '' : 'disabled'}>Clear</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="beat-sync-modal-footer">
+            <button class="btn btn-cancel" id="beatSyncModalCancel">Cancel</button>
+            <button class="btn btn-save" id="beatSyncModalSave">Save</button>
+          </div>
+        </div>
+      </div>
+      <style>
+        /* 테마 변수 정의 - 다크 테마 (기본값) */
+        #beat-sync-modal-container {
+          --modal-bg: #212121;
+          --modal-bg-secondary: #181818;
+          --modal-border: #3a3a3a;
+          --modal-text: #fff;
+          --modal-text-secondary: #aaa;
+          --modal-accent: #3ea6ff;
+        }
+        /* 라이트 테마 */
+        #beat-sync-modal-container.light-theme {
+          --modal-bg: #fff;
+          --modal-bg-secondary: #f2f2f2;
+          --modal-border: #d3d3d3;
+          --modal-text: #0f0f0f;
+          --modal-text-secondary: #606060;
+          --modal-accent: #065fd4;
+        }
+        .beat-sync-modal-overlay {
+          position: fixed;
+          top: 0;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          background: rgba(0, 0, 0, 0.6);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          z-index: 10001;
+        }
+        .beat-sync-modal {
+          background: var(--modal-bg);
+          border-radius: 8px;
+          width: 320px;
+          max-width: 90vw;
+          box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+          color: var(--modal-text);
+        }
+        .beat-sync-modal-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          padding: 12px 16px;
+          border-bottom: 1px solid var(--modal-border);
+        }
+        .beat-sync-modal-header h3 {
+          margin: 0;
+          font-size: 14px;
+          font-weight: 600;
+        }
+        .beat-sync-modal-close {
+          background: none;
+          border: none;
+          font-size: 20px;
+          cursor: pointer;
+          color: var(--modal-text-secondary);
+          padding: 0;
+          line-height: 1;
+        }
+        .beat-sync-modal-close:hover {
+          color: var(--modal-text);
+        }
+        .beat-sync-modal-body {
+          padding: 16px;
+        }
+        .beat-sync-global-toggle {
+          margin-bottom: 16px;
+          padding-bottom: 12px;
+          border-bottom: 1px solid var(--modal-border);
+        }
+        .checkbox-label {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          cursor: pointer;
+          font-size: 13px;
+        }
+        .checkbox-label input[type="checkbox"] {
+          width: 16px;
+          height: 16px;
+          cursor: pointer;
+        }
+        .beat-sync-local-settings {
+          transition: opacity 0.2s;
+        }
+        .setting-row {
+          display: flex;
+          align-items: center;
+          margin-bottom: 12px;
+          gap: 8px;
+        }
+        .setting-row label {
+          min-width: 80px;
+          font-size: 12px;
+          color: var(--modal-text-secondary);
+        }
+        .setting-row .tempo-input {
+          width: 60px;
+          padding: 4px 8px;
+          border: 1px solid var(--modal-border);
+          border-radius: 4px;
+          background: var(--modal-bg-secondary);
+          color: var(--modal-text);
+          font-size: 13px;
+        }
+        .setting-row select {
+          padding: 4px 8px;
+          border: 1px solid var(--modal-border);
+          border-radius: 4px;
+          background: var(--modal-bg-secondary);
+          color: var(--modal-text);
+          font-size: 13px;
+        }
+        .tap-sync-controls-modal {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+        .btn-tap-sync-modal {
+          padding: 6px 16px;
+          border: 2px solid var(--modal-accent);
+          border-radius: 4px;
+          background: transparent;
+          color: var(--modal-accent);
+          font-weight: 600;
+          cursor: pointer;
+          transition: all 0.1s;
+        }
+        .btn-tap-sync-modal:hover:not(:disabled) {
+          background: var(--modal-accent);
+          color: white;
+        }
+        .btn-tap-sync-modal:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
+        }
+        .btn-tap-sync-modal.tapped {
+          background: var(--modal-accent);
+          color: white;
+          transform: scale(0.95);
+        }
+        .tap-sync-score-modal {
+          font-size: 14px;
+          font-weight: 600;
+        }
+        .sync-result-value {
+          font-family: monospace;
+          font-size: 12px;
+        }
+        .fine-tune-buttons {
+          display: flex;
+          gap: 4px;
+          flex-wrap: wrap;
+        }
+        .btn-fine-tune {
+          padding: 2px 6px;
+          border: 1px solid var(--modal-border);
+          border-radius: 3px;
+          background: var(--modal-bg-secondary);
+          color: var(--modal-text);
+          font-size: 11px;
+          cursor: pointer;
+        }
+        .btn-fine-tune:hover:not(:disabled) {
+          background: var(--modal-border);
+        }
+        .btn-fine-tune:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
+        }
+        .btn-fine-tune.btn-clear {
+          color: #f44;
+        }
+        .beat-sync-modal-footer {
+          display: flex;
+          justify-content: flex-end;
+          gap: 8px;
+          padding: 12px 16px;
+          border-top: 1px solid var(--modal-border);
+        }
+        .btn-cancel {
+          padding: 6px 16px;
+          border: 1px solid var(--modal-border);
+          border-radius: 4px;
+          background: transparent;
+          color: var(--modal-text);
+          cursor: pointer;
+        }
+        .btn-cancel:hover {
+          background: var(--modal-bg-secondary);
+        }
+        .btn-save {
+          padding: 6px 16px;
+          border: none;
+          border-radius: 4px;
+          background: var(--modal-accent);
+          color: white;
+          cursor: pointer;
+          font-weight: 500;
+        }
+        .btn-save:hover {
+          opacity: 0.9;
+        }
+      </style>
+    `;
+  }
+
+  /**
+   * Beat Sync 모달 이벤트 리스너를 설정합니다.
+   */
+  private setupBeatSyncModalEvents(segment: LoopSegment) {
+    const modalContainer = this.ui.getElementById('beat-sync-modal-container');
+    if (!modalContainer) return;
+
+    // 닫기 버튼
+    const closeBtn = modalContainer.querySelector('#beatSyncModalClose');
+    closeBtn?.addEventListener('click', () => this.closeBeatSyncModal());
+
+    // 취소 버튼
+    const cancelBtn = modalContainer.querySelector('#beatSyncModalCancel');
+    cancelBtn?.addEventListener('click', () => this.closeBeatSyncModal());
+
+    // 오버레이 클릭으로 닫기
+    const overlay = modalContainer.querySelector('.beat-sync-modal-overlay');
+    overlay?.addEventListener('click', (e) => {
+      if (e.target === overlay) {
+        this.closeBeatSyncModal();
+      }
+    });
+
+    // Use custom settings 체크박스
+    const useCustomCheckbox = modalContainer.querySelector('#useCustomSyncCheckbox') as HTMLInputElement;
+    const localSettingsSection = modalContainer.querySelector('#localSettingsSection') as HTMLElement;
+
+    useCustomCheckbox?.addEventListener('change', () => {
+      const useCustom = useCustomCheckbox.checked;
+      if (localSettingsSection) {
+        localSettingsSection.style.opacity = useCustom ? '1' : '0.5';
+        localSettingsSection.style.pointerEvents = useCustom ? 'auto' : 'none';
+      }
+
+      // 모든 입력 필드 disabled 상태 변경
+      const inputs = localSettingsSection?.querySelectorAll('input, select, button');
+      inputs?.forEach(input => {
+        (input as HTMLInputElement | HTMLSelectElement | HTMLButtonElement).disabled = !useCustom;
+      });
+    });
+
+    // TAP Sync 버튼
+    const tapBtn = modalContainer.querySelector('#localTapSyncBtn') as HTMLButtonElement;
+    tapBtn?.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      if (tapBtn.disabled) return;
+      this.handleLocalTapSync(modalContainer);
+    });
+
+    // 미세 조정 버튼
+    const adjustOffset = (delta: number) => {
+      const resultSpan = modalContainer.querySelector('#localSyncResult') as HTMLElement;
+      if (!resultSpan) return;
+
+      const currentOffset = this.parseTimeToSeconds(resultSpan.textContent || '0');
+      const newOffset = Math.max(0, currentOffset + delta / 1000);
+      resultSpan.textContent = this.formatSyncTime(newOffset);
+    };
+
+    modalContainer.querySelector('#localSyncMinus10')?.addEventListener('click', () => adjustOffset(-10));
+    modalContainer.querySelector('#localSyncMinus1')?.addEventListener('click', () => adjustOffset(-1));
+    modalContainer.querySelector('#localSyncPlus1')?.addEventListener('click', () => adjustOffset(1));
+    modalContainer.querySelector('#localSyncPlus10')?.addEventListener('click', () => adjustOffset(10));
+
+    // Clear 버튼
+    modalContainer.querySelector('#localSyncClear')?.addEventListener('click', () => {
+      const resultRow = modalContainer.querySelector('#localSyncResultRow') as HTMLElement;
+      const resultSpan = modalContainer.querySelector('#localSyncResult') as HTMLElement;
+      if (resultRow) resultRow.style.display = 'none';
+      if (resultSpan) resultSpan.textContent = '--';
+      this.resetLocalTapSync();
+      this.updateLocalTapSyncUI(modalContainer);
+    });
+
+    // 저장 버튼
+    const saveBtn = modalContainer.querySelector('#beatSyncModalSave');
+    saveBtn?.addEventListener('click', () => {
+      this.saveBeatSyncSettings(modalContainer, segment.id);
+    });
+  }
+
+  /**
+   * 로컬 TAP Sync를 처리합니다.
+   */
+  private handleLocalTapSync(modalContainer: HTMLElement) {
+    const tempoInput = modalContainer.querySelector('#localTempoInput') as HTMLInputElement;
+    const timeSignatureSelect = modalContainer.querySelector('#localTimeSignature') as HTMLSelectElement;
+
+    const bpm = parseInt(tempoInput?.value || '120', 10);
+    const timeSignature = timeSignatureSelect?.value || '4/4';
+    const beatsPerBar = parseInt(timeSignature.split('/')[0], 10);
+    const beatDuration = 60 / bpm;
+
+    // 현재 박자 증가
+    this.localTapSyncCurrentBeat = (this.localTapSyncCurrentBeat % beatsPerBar) + 1;
+
+    // 소리 피드백
+    const isDownbeat = this.localTapSyncCurrentBeat === 1;
+    this.tapSyncMetronome.playClickNow(isDownbeat);
+
+    // TAP 버튼 시각적 피드백
+    const tapBtn = modalContainer.querySelector('#localTapSyncBtn') as HTMLButtonElement;
+    if (tapBtn) {
+      tapBtn.textContent = `${this.localTapSyncCurrentBeat}/${beatsPerBar}`;
+      tapBtn.classList.add('tapped');
+      setTimeout(() => tapBtn.classList.remove('tapped'), 100);
+    }
+
+    // 5초 이상 탭이 없으면 히스토리 리셋
+    const now = Date.now();
+    if (now - this.localTapSyncLastResetTime > 5000 && this.localTapSyncHistory.length > 0) {
+      this.localTapSyncHistory = [];
+      this.localTapSyncScore = 0;
+    }
+    this.localTapSyncLastResetTime = now;
+
+    // 현재 탭 기록
+    this.onCommand?.('get-current-time', {
+      callback: (currentTime: number) => {
+        const beatsFromDownbeat = this.localTapSyncCurrentBeat - 1;
+        const estimatedDownbeatTime = currentTime - (beatsFromDownbeat * beatDuration);
+
+        const barDuration = beatDuration * beatsPerBar;
+        let calculatedOffset = estimatedDownbeatTime % barDuration;
+        if (calculatedOffset < 0) calculatedOffset += barDuration;
+
+        this.localTapSyncHistory.push({
+          beatNumber: this.localTapSyncCurrentBeat,
+          tappedTime: currentTime,
+          calculatedOffset
+        });
+
+        if (this.localTapSyncHistory.length > 16) {
+          this.localTapSyncHistory.shift();
+        }
+
+        // 결과 계산 및 UI 업데이트
+        if (this.localTapSyncHistory.length >= 2) {
+          const { averageOffset, score } = this.calculateLocalTapSyncResult(barDuration);
+          this.localTapSyncScore = score;
+
+          // 1st Beat 표시 업데이트
+          const resultRow = modalContainer.querySelector('#localSyncResultRow') as HTMLElement;
+          const resultSpan = modalContainer.querySelector('#localSyncResult') as HTMLElement;
+          if (resultRow) resultRow.style.display = 'flex';
+          if (resultSpan) resultSpan.textContent = this.formatSyncTime(averageOffset);
+        }
+
+        this.updateLocalTapSyncUI(modalContainer);
+      }
+    });
+  }
+
+  /**
+   * 로컬 TAP Sync 결과를 계산합니다.
+   */
+  private calculateLocalTapSyncResult(barDuration: number): { averageOffset: number; score: number } {
+    if (this.localTapSyncHistory.length < 2) {
+      return { averageOffset: 0, score: 0 };
+    }
+
+    const offsets = this.localTapSyncHistory.map(t => t.calculatedOffset);
+
+    // 원형 평균 계산
+    let sinSum = 0;
+    let cosSum = 0;
+    for (const offset of offsets) {
+      const angle = (offset / barDuration) * 2 * Math.PI;
+      sinSum += Math.sin(angle);
+      cosSum += Math.cos(angle);
+    }
+    const avgAngle = Math.atan2(sinSum / offsets.length, cosSum / offsets.length);
+    let averageOffset = (avgAngle / (2 * Math.PI)) * barDuration;
+    if (averageOffset < 0) averageOffset += barDuration;
+
+    // 표준편차 계산
+    let varianceSum = 0;
+    for (const offset of offsets) {
+      let diff = Math.abs(offset - averageOffset);
+      if (diff > barDuration / 2) diff = barDuration - diff;
+      varianceSum += diff * diff;
+    }
+    const stdDev = Math.sqrt(varianceSum / offsets.length);
+    const stdDevMs = stdDev * 1000;
+
+    // 점수 계산
+    let consistencyScore: number;
+    if (stdDevMs <= 15) {
+      consistencyScore = 90 + (1 - stdDevMs / 15) * 10;
+    } else if (stdDevMs <= 25) {
+      consistencyScore = 80 + (1 - (stdDevMs - 15) / 10) * 10;
+    } else if (stdDevMs <= 40) {
+      consistencyScore = 50 + (1 - (stdDevMs - 25) / 15) * 30;
+    } else if (stdDevMs <= 60) {
+      consistencyScore = (1 - (stdDevMs - 40) / 20) * 50;
+    } else {
+      consistencyScore = 0;
+    }
+
+    // 템포 정확도 계산
+    let tempoScore = 100;
+    if (this.localTapSyncHistory.length >= 3) {
+      const tappedTimes = this.localTapSyncHistory.map(t => t.tappedTime);
+      const intervals: number[] = [];
+      for (let i = 1; i < tappedTimes.length; i++) {
+        intervals.push(tappedTimes[i] - tappedTimes[i - 1]);
+      }
+      const avgInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+      const tempoInput = this.ui.querySelector('#localTempoInput') as HTMLInputElement;
+      const bpm = parseInt(tempoInput?.value || '120', 10);
+      const expectedBeatDuration = 60 / bpm;
+      const tempoErrorPercent = Math.abs(avgInterval - expectedBeatDuration) / expectedBeatDuration * 100;
+
+      if (tempoErrorPercent <= 2) {
+        tempoScore = 100;
+      } else if (tempoErrorPercent <= 5) {
+        tempoScore = 80 + (1 - (tempoErrorPercent - 2) / 3) * 20;
+      } else if (tempoErrorPercent <= 10) {
+        tempoScore = 50 + (1 - (tempoErrorPercent - 5) / 5) * 30;
+      } else if (tempoErrorPercent <= 15) {
+        tempoScore = 20 + (1 - (tempoErrorPercent - 10) / 5) * 30;
+      } else {
+        tempoScore = Math.max(0, 20 - (tempoErrorPercent - 15) * 2);
+      }
+    }
+
+    const finalScore = consistencyScore * 0.7 + tempoScore * 0.3;
+    return { averageOffset, score: Math.round(finalScore) };
+  }
+
+  /**
+   * 로컬 TAP Sync UI를 업데이트합니다.
+   */
+  private updateLocalTapSyncUI(modalContainer: HTMLElement) {
+    const scoreDiv = modalContainer.querySelector('#localTapSyncScore') as HTMLElement;
+    if (!scoreDiv) return;
+
+    const tapCount = this.localTapSyncHistory.length;
+    const hasEnoughSamples = tapCount >= this.TAP_SYNC_MIN_SAMPLES;
+
+    if (tapCount > 0) {
+      scoreDiv.style.display = 'block';
+      const scoreColor = hasEnoughSamples ? this.getScoreColor(this.localTapSyncScore) : '#f44336';
+      scoreDiv.style.color = scoreColor;
+      scoreDiv.textContent = hasEnoughSamples ? `${this.localTapSyncScore}%` : '--%';
+      scoreDiv.title = `Sync accuracy (${tapCount}/${this.TAP_SYNC_MIN_SAMPLES} taps)`;
+    } else {
+      scoreDiv.style.display = 'none';
+    }
+  }
+
+  /**
+   * 시간 문자열을 초로 변환합니다.
+   */
+  private parseTimeToSeconds(timeStr: string): number {
+    if (timeStr === '--') return 0;
+    const parts = timeStr.split(':');
+    if (parts.length === 2) {
+      const mins = parseInt(parts[0], 10);
+      const secs = parseFloat(parts[1]);
+      return mins * 60 + secs;
+    }
+    return parseFloat(timeStr) || 0;
+  }
+
+  /**
+   * Beat Sync 설정을 저장합니다.
+   */
+  private saveBeatSyncSettings(modalContainer: HTMLElement, segmentId: string) {
+    const useCustomCheckbox = modalContainer.querySelector('#useCustomSyncCheckbox') as HTMLInputElement;
+    const tempoInput = modalContainer.querySelector('#localTempoInput') as HTMLInputElement;
+    const timeSignatureSelect = modalContainer.querySelector('#localTimeSignature') as HTMLSelectElement;
+    const resultSpan = modalContainer.querySelector('#localSyncResult') as HTMLElement;
+
+    const useCustom = useCustomCheckbox?.checked ?? false;
+    const localTempo = parseInt(tempoInput?.value || '120', 10);
+    const localTimeSignature = timeSignatureSelect?.value || '4/4';
+    const resultText = resultSpan?.textContent || '--';
+    const localOffset = resultText !== '--' ? this.parseTimeToSeconds(resultText) : undefined;
+
+    this.onCommand?.('update-segment-sync', {
+      segmentId,
+      useGlobalSync: !useCustom,  // 반전: useCustom이 true면 useGlobalSync는 false
+      localTempo: useCustom ? localTempo : undefined,
+      localTimeSignature: useCustom ? localTimeSignature : undefined,
+      localMetronomeOffset: useCustom ? localOffset : undefined
+    });
+
+    this.closeBeatSyncModal();
+  }
+
+  // ========== End Beat Sync Modal Methods ==========
 
   /**
    * UI를 정리합니다.

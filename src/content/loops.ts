@@ -30,7 +30,9 @@ export class LoopController {
     });
 
     // 비디오 재생 시 메트로놈 재시작
-    this.video.addEventListener('play', () => {
+    // 'playing' 이벤트 사용: 실제로 재생이 시작된 후 발생하므로 타이밍이 더 정확함
+    // 'play' 이벤트는 재생 요청 시점에 발생하여 실제 재생과 수십~수백ms 차이 발생 가능
+    this.video.addEventListener('playing', () => {
       if (this.globalSyncMetronomeActive) {
         this.startGlobalSyncMetronome();
       } else if (this.active?.metronomeEnabled) {
@@ -395,36 +397,71 @@ export class LoopController {
   }
 
   /**
+   * 세그먼트의 유효 Beat Sync 설정을 반환합니다.
+   * 로컬 설정이 있으면 로컬, 없으면 글로벌 설정을 반환합니다.
+   */
+  private getEffectiveSync(segment: LoopSegment): {
+    tempo: number | undefined;
+    timeSignature: string | undefined;
+    offset: number | undefined;
+  } {
+    if (segment.useGlobalSync !== false) {
+      // 글로벌 설정 사용
+      return {
+        tempo: this.profile.tempo,
+        timeSignature: this.profile.timeSignature,
+        offset: this.profile.globalMetronomeOffset
+      };
+    } else {
+      // 로컬 설정 사용
+      return {
+        tempo: segment.localTempo,
+        timeSignature: segment.localTimeSignature,
+        offset: segment.localMetronomeOffset
+      };
+    }
+  }
+
+  /**
    * 메트로놈 시작
    */
   private startMetronome(): void {
-    if (!this.active || !this.profile.tempo || !this.profile.timeSignature) {
+    if (!this.active) {
+      console.log('메트로놈 시작 실패: 활성 루프 없음');
+      return;
+    }
+
+    // 유효 Beat Sync 설정 가져오기
+    const effectiveSync = this.getEffectiveSync(this.active);
+
+    if (!effectiveSync.tempo || !effectiveSync.timeSignature) {
       console.log('메트로놈 시작 실패: BPM 또는 박자표 미설정');
       return;
     }
 
-    // 글로벌 오프셋 적용
-    const globalOffset = this.profile.globalMetronomeOffset || 0;
+    // 오프셋 적용
+    const offset = effectiveSync.offset || 0;
 
-    // 비디오의 절대 시간에서 글로벌 오프셋을 빼서 메트로놈 시작 시간 계산
-    // 예: 비디오 2.323s, 글로벌 오프셋 2.323s → 메트로놈은 0s부터 시작 (첫 박)
-    const startOffset = this.video.currentTime - globalOffset;
+    // 비디오의 절대 시간에서 오프셋을 빼서 메트로놈 시작 시간 계산
+    // 예: 비디오 2.323s, 오프셋 2.323s → 메트로놈은 0s부터 시작 (첫 박)
+    const startOffset = this.video.currentTime - offset;
     const loopDuration = this.active.end - this.active.start;
 
     this.metronome.start(
-      this.profile.tempo,
-      this.profile.timeSignature,
+      effectiveSync.tempo,
+      effectiveSync.timeSignature,
       startOffset,
       loopDuration
     );
 
     console.log('메트로놈 시작:', {
-      bpm: this.profile.tempo,
-      timeSignature: this.profile.timeSignature,
+      bpm: effectiveSync.tempo,
+      timeSignature: effectiveSync.timeSignature,
       videoCurrentTime: this.video.currentTime,
-      globalOffset,
+      offset,
       startOffset,
-      loopDuration
+      loopDuration,
+      useGlobalSync: this.active.useGlobalSync !== false
     });
   }
 

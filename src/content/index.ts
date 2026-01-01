@@ -222,6 +222,14 @@ export class YouTubeLoopPractice {
           this.duplicateSegment(data?.segmentId);
           this.refreshUI();
           break;
+        case 'quantize-segment':
+          this.quantizeSegment(data?.segmentId);
+          this.refreshUI();
+          break;
+        case 'update-segment-sync':
+          this.updateSegmentSync(data?.segmentId, data);
+          this.refreshUI();
+          break;
         case 'update-label':
           this.updateSegment(data?.segmentId, { label: data?.label });
           this.refreshUI();
@@ -1021,7 +1029,12 @@ export class YouTubeLoopPractice {
       start: newStart,
       end: newEnd,
       rate: safeDefaultRate,
-      label: newLabel
+      label: newLabel,
+      // Beat Sync 설정 상속
+      useGlobalSync: segment.useGlobalSync,
+      localTempo: segment.localTempo,
+      localTimeSignature: segment.localTimeSignature,
+      localMetronomeOffset: segment.localMetronomeOffset
     };
 
     // 기준 세그먼트 바로 다음 위치에 삽입
@@ -1055,7 +1068,12 @@ export class YouTubeLoopPractice {
       end: segment.end,
       rate: segment.rate,
       label: newLabel,
-      metronomeEnabled: segment.metronomeEnabled
+      metronomeEnabled: segment.metronomeEnabled,
+      // Beat Sync 설정 상속
+      useGlobalSync: segment.useGlobalSync,
+      localTempo: segment.localTempo,
+      localTimeSignature: segment.localTimeSignature,
+      localMetronomeOffset: segment.localMetronomeOffset
     };
 
     // 기준 세그먼트 바로 다음 위치에 삽입
@@ -1068,6 +1086,130 @@ export class YouTubeLoopPractice {
 
     // 생성된 카드로 스크롤
     this.scrollToSegment(newSegment.id);
+  }
+
+  /**
+   * 세그먼트의 start/end 시간을 가장 가까운 박으로 양자화합니다.
+   * 세그먼트의 로컬 설정이 있으면 로컬, 없으면 글로벌 설정을 사용합니다.
+   */
+  private quantizeSegment(segmentId: string) {
+    if (!this.profile) return;
+
+    const segment = this.profile.segments.find(s => s.id === segmentId);
+    if (!segment) return;
+
+    // 유효 Beat Sync 설정 가져오기
+    const effectiveSync = this.getEffectiveSync(segment);
+
+    // BPM이 설정되지 않으면 양자화 불가
+    if (!effectiveSync.tempo) {
+      console.warn('양자화 실패: BPM이 설정되지 않음');
+      return;
+    }
+
+    const bpm = effectiveSync.tempo;
+    const offset = effectiveSync.offset || 0;
+    const beatDuration = 60 / bpm; // 1박 길이 (초)
+
+    // 가장 가까운 박으로 스냅하는 함수
+    const quantizeTime = (time: number): number => {
+      // offset 기준으로 상대 시간 계산
+      const relativeTime = time - offset;
+      // 가장 가까운 박 번호 (반올림)
+      const nearestBeatNumber = Math.round(relativeTime / beatDuration);
+      // 양자화된 절대 시간
+      return offset + (nearestBeatNumber * beatDuration);
+    };
+
+    const quantizedStart = quantizeTime(segment.start);
+    let quantizedEnd = quantizeTime(segment.end);
+
+    // 양자화 후 start >= end가 되면 end를 최소 1박 뒤로 이동
+    if (quantizedEnd <= quantizedStart) {
+      quantizedEnd = quantizedStart + beatDuration;
+    }
+
+    // 음수 시간 방지
+    const finalStart = Math.max(0, quantizedStart);
+    const finalEnd = Math.max(finalStart + beatDuration, quantizedEnd);
+
+    this.updateSegment(segmentId, {
+      start: finalStart,
+      end: finalEnd
+    });
+
+    console.log(`세그먼트 양자화: ${segment.label}`, {
+      before: { start: segment.start.toFixed(3), end: segment.end.toFixed(3) },
+      after: { start: finalStart.toFixed(3), end: finalEnd.toFixed(3) },
+      bpm,
+      beatDuration: beatDuration.toFixed(3)
+    });
+  }
+
+  /**
+   * 세그먼트의 Beat Sync 설정을 업데이트합니다.
+   */
+  private updateSegmentSync(segmentId: string, data: {
+    useGlobalSync?: boolean;
+    localTempo?: number;
+    localTimeSignature?: string;
+    localMetronomeOffset?: number;
+  }) {
+    if (!this.profile) return;
+
+    const segment = this.profile.segments.find(s => s.id === segmentId);
+    if (!segment) return;
+
+    // 설정 업데이트
+    segment.useGlobalSync = data.useGlobalSync;
+
+    if (data.useGlobalSync) {
+      // 글로벌 설정 사용 시 로컬 설정 제거
+      delete segment.localTempo;
+      delete segment.localTimeSignature;
+      delete segment.localMetronomeOffset;
+    } else {
+      // 로컬 설정 저장
+      segment.localTempo = data.localTempo;
+      segment.localTimeSignature = data.localTimeSignature as any;
+      segment.localMetronomeOffset = data.localMetronomeOffset;
+    }
+
+    // 프로필 저장
+    this.saveProfile();
+
+    console.log(`세그먼트 Beat Sync 업데이트: ${segment.label}`, {
+      useGlobalSync: segment.useGlobalSync,
+      localTempo: segment.localTempo,
+      localTimeSignature: segment.localTimeSignature,
+      localMetronomeOffset: segment.localMetronomeOffset
+    });
+  }
+
+  /**
+   * 세그먼트의 유효 Beat Sync 설정을 반환합니다.
+   * 로컬 설정이 있으면 로컬, 없으면 글로벌 설정을 반환합니다.
+   */
+  private getEffectiveSync(segment: LoopSegment): {
+    tempo: number | undefined;
+    timeSignature: string | undefined;
+    offset: number | undefined;
+  } {
+    if (segment.useGlobalSync !== false) {
+      // 글로벌 설정 사용
+      return {
+        tempo: this.profile?.tempo,
+        timeSignature: this.profile?.timeSignature,
+        offset: this.profile?.globalMetronomeOffset
+      };
+    } else {
+      // 로컬 설정 사용
+      return {
+        tempo: segment.localTempo,
+        timeSignature: segment.localTimeSignature,
+        offset: segment.localMetronomeOffset
+      };
+    }
   }
 
   /**

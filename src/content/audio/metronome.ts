@@ -24,9 +24,9 @@ export class Metronome {
   private loopDuration: number = 0;
 
   // 볼륨 설정 (0.0 ~ 1.0, 실제 출력은 MAX_VOLUME을 곱함)
-  private volume: number = 0.8;
+  private volume: number = 0.9;
   // 최대 볼륨 승수 (YouTube 볼륨과 비슷한 수준으로 설정)
-  private readonly MAX_VOLUME = 3.0;
+  private readonly MAX_VOLUME = 4.0;
 
   constructor() {
     // AudioContext는 start 시점에 생성 (사용자 상호작용 필요)
