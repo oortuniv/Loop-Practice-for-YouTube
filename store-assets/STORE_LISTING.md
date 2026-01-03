@@ -5,7 +5,7 @@
 
 ## Short Description (max 132 characters)
 
-Practice smarter with loop sections, speed control, beat-synced metronome, and quantize. Perfect for musicians learning from YouTube.
+Section looping, speed control, beat-synced metronome & quantize for YouTube. Perfect for musicians practicing.
 
 ---
 

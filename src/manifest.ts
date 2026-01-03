@@ -4,7 +4,7 @@ export default defineManifest({
   manifest_version: 3,
   name: "Loop Practice for YouTube",
   version: "0.4.0",
-  description: "Practice with section looping, playback speed control, beat sync metronome, and quantize. Perfect for musicians learning from YouTube.",
+  description: "Section looping, speed control, beat-synced metronome & quantize for YouTube. Perfect for musicians practicing.",
 
 
   permissions: [
