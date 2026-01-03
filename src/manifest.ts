@@ -3,8 +3,8 @@ import { defineManifest } from '@crxjs/vite-plugin';
 export default defineManifest({
   manifest_version: 3,
   name: "Loop Practice for YouTube",
-  version: "0.1.0",
-  description: "Practice efficiently with section looping, speed control, and tempo tracking. Perfect for musicians learning from YouTube videos.",
+  version: "0.4.0",
+  description: "Practice with section looping, playback speed control, beat sync metronome, and quantize. Perfect for musicians learning from YouTube.",
 
 
   permissions: [

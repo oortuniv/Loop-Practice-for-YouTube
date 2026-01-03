@@ -1,6 +1,6 @@
 # Privacy Policy for Loop Practice for YouTube
 
-**Last Updated**: December 29, 2025
+**Last Updated**: January 4, 2026
 **Effective Date**: December 29, 2025
 
 ## Introduction
@@ -17,11 +17,17 @@ Loop Practice for YouTube stores the following data **locally on your device** u
    - Start and end times for practice sections
    - Section labels and playback speeds
    - Tempo (BPM) and time signature settings
+   - Beat sync offset (first downbeat timing)
+   - Metronome preferences (enabled/disabled, volume)
    - Per-video configuration
 
 2. **UI Preferences**
    - Collapsed/expanded state of section cards
    - Theme preferences (automatically detected from YouTube)
+
+3. **Audio Settings**
+   - Metronome volume level
+   - This data is used solely to generate click sounds locally via Web Audio API
 
 ### Data We DO NOT Collect
 
@@ -39,6 +45,7 @@ The data collected is used **exclusively** for:
 1. **Functionality**: Storing your practice loop configurations for each YouTube video
 2. **Persistence**: Remembering your settings when you return to a video
 3. **Synchronization**: Optionally syncing your loop data across your Chrome browsers (if you're signed into Chrome)
+4. **Audio Generation**: Creating metronome click sounds locally using Web Audio API (no audio is recorded or transmitted)
 
 ## Data Storage and Security
 

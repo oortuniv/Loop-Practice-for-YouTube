@@ -222,10 +222,28 @@ export class YouTubeLoopPractice {
           this.duplicateSegment(data?.segmentId);
           this.refreshUI();
           break;
-        case 'quantize-segment':
-          this.quantizeSegment(data?.segmentId);
+        case 'quantize-segment': {
+          const result = this.quantizeSegment(data?.segmentId);
           this.refreshUI();
+          if (result.success) {
+            this.uiController?.showToast(`Quantized: ${result.label}`, 'success');
+          } else {
+            this.uiController?.showToast(result.error || 'Quantize failed', 'error');
+          }
           break;
+        }
+        case 'quantize-all': {
+          const allResult = this.quantizeAllSegments();
+          this.refreshUI();
+          if (allResult.success > 0) {
+            this.uiController?.showToast(`Quantized ${allResult.success} loop(s)`, 'success');
+          } else if (allResult.failed > 0) {
+            this.uiController?.showToast(`No loops quantized (${allResult.failed} failed)`, 'error');
+          } else {
+            this.uiController?.showToast('No loops to quantize', 'info');
+          }
+          break;
+        }
         case 'update-segment-sync':
           this.updateSegmentSync(data?.segmentId, data);
           this.refreshUI();
@@ -339,6 +357,19 @@ export class YouTubeLoopPractice {
           this.saveProfile();
           // 메트로놈도 중지
           this.loopController?.stopGlobalSyncMetronome();
+          break;
+        case 'set-global-offset':
+          // 글로벌 오프셋 직접 설정
+          if (typeof data?.offset === 'number') {
+            this.updateProfile(profile => {
+              profile.globalMetronomeOffset = data.offset;
+            });
+            this.saveProfile();
+            // 메트로놈이 활성화되어 있으면 BeatMap 재생성
+            if (this.loopController) {
+              this.loopController.updateGlobalBeatMap();
+            }
+          }
           break;
         case 'toggle-global-metronome':
           // 글로벌 메트로놈 토글
@@ -1031,11 +1062,7 @@ export class YouTubeLoopPractice {
         after: this.video.currentTime
       });
 
-      // 메트로놈이 실행 중이면 새 위치에서 resync (더블비트 방지)
-      // setProfile()에서는 video.currentTime이 아직 변경 전이므로 여기서 호출
-      if (this.loopController) {
-        this.loopController.resyncMetronomeIfRunning(segment.start);
-      }
+      // 이벤트 기반 스케줄링에서는 seeked 이벤트가 자동으로 재스케줄링을 처리함
 
       // 영상이 정지 상태면 재생 시작
       if (this.video.paused) {
@@ -1201,23 +1228,53 @@ export class YouTubeLoopPractice {
   }
 
   /**
+   * 모든 세그먼트의 start/end 시간을 가장 가까운 박으로 양자화합니다.
+   * @returns 성공/실패 개수
+   */
+  private quantizeAllSegments(): { success: number; failed: number } {
+    if (!this.profile) return { success: 0, failed: 0 };
+
+    let success = 0;
+    let failed = 0;
+
+    for (const segment of this.profile.segments) {
+      const result = this.quantizeSegment(segment.id);
+      if (result.success) {
+        success++;
+      } else {
+        failed++;
+      }
+    }
+
+    this.saveProfile();
+    console.log('모든 세그먼트 양자화 완료:', { success, failed, total: this.profile.segments.length });
+    return { success, failed };
+  }
+
+  /**
    * 세그먼트의 start/end 시간을 가장 가까운 박으로 양자화합니다.
    * 세그먼트의 로컬 설정이 있으면 로컬, 없으면 글로벌 설정을 사용합니다.
+   * @returns 성공 여부와 세그먼트 라벨 또는 에러 메시지
    */
-  private quantizeSegment(segmentId: string) {
-    if (!this.profile) return;
+  private quantizeSegment(segmentId: string): { success: boolean; label?: string; error?: string } {
+    if (!this.profile) return { success: false, error: 'No profile' };
 
     const segment = this.profile.segments.find(s => s.id === segmentId);
-    if (!segment) return;
+    if (!segment) return { success: false, error: 'Segment not found' };
 
     // 유효 Beat Sync 설정 가져오기
     const effectiveSync = this.getEffectiveSync(segment);
 
     // BPM이 설정되지 않으면 양자화 불가
-    // (UI에서 Beat Sync가 완료되지 않으면 Quantize 메뉴가 표시되지 않으므로 여기 도달하지 않음)
     if (!effectiveSync.tempo) {
       console.warn('양자화 실패: BPM이 설정되지 않음');
-      return;
+      return { success: false, error: 'Beat Sync not configured' };
+    }
+
+    // offset이 설정되지 않으면 양자화 불가
+    if (typeof effectiveSync.offset !== 'number') {
+      console.warn('양자화 실패: Offset이 설정되지 않음');
+      return { success: false, error: 'Beat Sync not configured' };
     }
 
     const bpm = effectiveSync.tempo;
@@ -1257,6 +1314,8 @@ export class YouTubeLoopPractice {
       bpm,
       beatDuration: beatDuration.toFixed(3)
     });
+
+    return { success: true, label: segment.label };
   }
 
   /**

@@ -1,8 +1,8 @@
 # Loop Practice for YouTube
 
-> A Chrome Extension for efficient practice with YouTube videos through section looping and playback speed control.
+> A Chrome Extension for efficient practice with YouTube videos through section looping, playback speed control, and beat-synced metronome.
 
-YouTube 동영상으로 연습할 때 필요한 구간 반복, 속도 조절 기능을 제공하는 Chrome 확장 프로그램입니다.
+YouTube 동영상으로 연습할 때 필요한 구간 반복, 속도 조절, 비트 싱크 메트로놈 기능을 제공하는 Chrome 확장 프로그램입니다.
 
 ## ✨ Features
 
@@ -12,16 +12,22 @@ YouTube 동영상으로 연습할 때 필요한 구간 반복, 속도 조절 기
 - **Preset Labels**: Choose from common section names (Intro, Verse, Chorus, Bridge, Outro) or create custom labels
 - **Drag & Drop Reordering**: Reorganize your loop sections with simple drag and drop
 - **Collapsible Cards**: Collapse sections to keep your workspace clean
+- **Quantize**: Snap loop start/end points to the nearest beat for precise timing
 
 ### ⏯️ Playback Control
 - **Automatic Looping**: Seamlessly loops back to the start when reaching the end of a section
 - **Speed Adjustment**: Change playback speed from 0.25x to 2x for each loop section
 - **Fine-grained Time Control**: Adjust start/end times with precision using drag or manual input
+- **Count-in**: Optional count-in before loop playback starts
 
-### 🎵 Music Practice Features
-- **Tempo (BPM) Tracking**: Set the song's tempo for bar-based loop creation
+### 🎵 Beat Sync & Metronome
 - **TAP Tempo**: Quickly determine BPM by tapping along with the music
+- **First Beat Sync**: Tap the first downbeat to sync the metronome with the video
+- **Beat-synced Metronome**: Audible click track that stays synchronized with the video
+- **Adjustable Volume**: Control metronome volume with a slider
 - **Time Signature Support**: Support for various time signatures (2/4, 3/4, 4/4, 5/4, 6/8, 7/8, 9/8, 12/8, 6/4)
+- **Per-loop Beat Settings**: Each loop can have its own tempo and offset settings
+- **Anacrusis Support**: Proper beat numbering for pickup measures (못갖춘마디)
 
 ### 💾 Data Persistence
 - **Auto-save**: All settings and loop sections are automatically saved
@@ -68,14 +74,21 @@ YouTube 동영상으로 연습할 때 필요한 구간 반복, 속도 조절 기
    - Click the play icon (▶) on any loop card
    - The video will automatically loop between the start and end times
 
-4. **Adjust settings**
+4. **Set up Beat Sync** (for metronome and quantize)
    - Set **Tempo (BPM)**: Use TAP button or type manually
-   - Set **Time Signature**: Select from dropdown
-   - Adjust **Speed**: Fine-tune playback speed per loop
+   - Set **Time Signature**: Select from dropdown (4/4, 3/4, etc.)
+   - Tap **First Beat**: Click when you hear the first downbeat to sync timing
+   - Toggle **Metronome**: Enable the click track for practice
 
-5. **Manage loops**
+5. **Adjust playback**
+   - Adjust **Speed**: Fine-tune playback speed per loop (0.25x - 2x)
+   - Use **Quantize**: Snap loop boundaries to beat positions
+   - Enable **Count-in**: Get ready beats before the loop starts
+
+6. **Manage loops**
    - **Edit**: Click the pencil icon to rename
    - **Delete**: Use the menu (⋮) to remove
+   - **Duplicate**: Copy an existing loop section
    - **Reorder**: Drag cards to reorganize
    - **Collapse**: Click the chevron to minimize cards
 
@@ -100,7 +113,8 @@ src/
     ├── ui-controller.ts     # UI Rendering & Event Handling
     ├── ui.ts                # DOM Injection
     └── audio/
-        └── metronome.ts     # Web Audio API Metronome
+        ├── metronome.ts     # Web Audio API Metronome
+        └── beat-map.ts      # Beat timing calculation
 ```
 
 ### Build Commands
@@ -131,8 +145,8 @@ npm test:watch
 
 ### Current Limitations
 - Keyboard shortcuts are temporarily disabled
-- Some advanced metronome features are hidden in UI but available in code
 - Depends on YouTube's DOM structure (may break with YouTube updates)
+- Metronome uses Web Audio API (wired headphones recommended for precise timing)
 
 ### Browser Compatibility
 - Chrome/Chromium-based browsers (Edge, Brave, etc.)

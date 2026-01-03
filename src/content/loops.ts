@@ -1,148 +1,789 @@
 import { LoopSegment, VideoProfile } from '../types';
-import { throttle } from '../utils';
-import { Metronome } from './audio/metronome';
+import { parseTimeSignature, throttle } from '../utils';
+import { BeatMap } from './audio/beat-map';
+import { Metronome, ScheduledBeatNodes, cancelScheduledBeat } from './audio/metronome';
 
+// 빌드 고유 ID (디버깅용) - 코드 변경 시 수동으로 업데이트
+export const BUILD_ID = 'v2025-0104-014';
+console.log(`[LoopController] 🔧 빌드 ID: ${BUILD_ID}`);
+
+// 인스턴스 추적용
+let instanceCounter = 0;
+
+/**
+ * LoopController: 루프 재생 및 메트로놈 관리
+ *
+ * 새 구조 (이벤트 기반, 폴링 없음):
+ * - BeatMap: 비트 시간 사전 계산 (Beat Sync 완료 시)
+ * - Metronome: 클릭음 재생
+ * - 이벤트 기반 스케줄링: video.playing, seeked, ratechange 등
+ *
+ * 기능:
+ * 1. 루프 재생: loopEnd 도달 시 자동으로 loopStart로 점프
+ * 2. 메트로놈: 미리 스케줄된 비트에 맞춰 클릭음 재생
+ * 3. 글로벌 싱크: 전체 영상에 대해 메트로놈만 재생 (루프 없이)
+ */
 export class LoopController {
   private video: HTMLVideoElement;
   private profile: VideoProfile;
   private active?: LoopSegment;
   private tickThrottled: () => void;
+
+  // 핵심 컴포넌트
   private metronome: Metronome;
-  private globalSyncMetronomeActive: boolean = false; // 글로벌 싱크 메트로놈 활성화 상태
 
-  // 메트로놈 비트 콜백 (UI 업데이트용)
-  private metronomeBeatCallback: ((beat: number, total: number) => void) | null = null;
+  // BeatMap 관리 (글로벌/로컬 별도)
+  private globalBeatMap: BeatMap | null = null;
+  private localBeatMaps: Map<string, BeatMap> = new Map();
 
-  // 루프 점프 처리 플래그 (중복 호출 방지)
+  // 스케줄링 상태
+  private scheduledNodes: ScheduledBeatNodes[] = [];
+  private nextLoopScheduledNodes: ScheduledBeatNodes[] = []; // 다음 루프용 (취소 가능)
+  private nextLoopBeatTimers: number[] = []; // 다음 루프 UI 콜백 타이머
+  private loopJumpTimer: number | null = null;
+  private beatDisplayTimers: number[] = []; // UI 콜백 타이머 추적
+  private continueScheduleTimer: number | null = null; // 30초 연속 스케줄링용
+  private isScheduling: boolean = false;
+
+  // 상태 플래그
+  private globalSyncMetronomeActive: boolean = false;
+  private metronomeEnabled: boolean = false;
   private isJumping: boolean = false;
+  private jumpCompletedAt: number = 0; // 점프 완료 시간 (pause 무시용)
+
+  // 루프 범위
+  private loopStart: number = 0;
+  private loopEnd: number = Infinity;
+
+  // UI 콜백
+  private beatDisplayCallback: ((beat: number, total: number) => void) | null = null;
 
   // 카운트인 관련 상태
   private countInActive: boolean = false;
   private countInVideoStartTimer: number | null = null;
-  private countInTargetSegmentStart: number | null = null; // 하이브리드 모드에서 감지할 시작점
-  private countInOnComplete: (() => void) | null = null; // 카운트인 완료 콜백
-  private countInTimeUpdateHandler: (() => void) | null = null; // timeupdate 핸들러 참조
+
+  // 인스턴스 ID
+  private readonly instanceId: number;
+
+  // 이벤트 핸들러 참조 (dispose 시 제거용)
+  private boundHandlers: {
+    pause: () => void;
+    playing: () => void;
+    seeked: () => void;
+    ratechange: () => void;
+  } | null = null;
 
   constructor(video: HTMLVideoElement, profile: VideoProfile) {
+    this.instanceId = ++instanceCounter;
+    console.log(`[LoopController] 🆕 인스턴스 생성 #${this.instanceId}`, {
+      videoId: profile.videoId,
+      activeSegmentId: profile.activeSegmentId,
+      segmentsCount: profile.segments.length
+    });
+
     this.video = video;
     this.profile = profile;
-    this.tickThrottled = throttle(() => this.tick(), 50); // 100ms → 50ms로 단축
+    this.tickThrottled = throttle(() => this.tick(), 50);
+
+    // 메트로놈 초기화
     this.metronome = new Metronome();
-    this.metronome.setVideo(video); // 비디오 엘리먼트 설정
 
     // 초기 활성 구간 설정
     if (profile.activeSegmentId) {
       this.setActive(profile.activeSegmentId);
     }
 
-    // 비디오 일시정지 시 메트로놈 중지
-    this.video.addEventListener('pause', () => {
-      if (this.metronome.isRunning()) {
-        // 소리만 멈추고 플래그는 유지 (재생 시 다시 시작하기 위해)
-        this.metronome.stop();
+    // 비디오 이벤트 리스너
+    this.setupVideoEventListeners();
+
+    // 초기 BeatMap 생성 (글로벌 설정이 있으면)
+    this.updateGlobalBeatMap();
+
+    // 로컬 BeatMap 초기화 (이미 Beat Sync가 완료된 세그먼트들)
+    for (const segment of profile.segments) {
+      if (segment.useGlobalSync === false && segment.localTempo && segment.localTimeSignature) {
+        this.updateLocalBeatMap(segment.id);
       }
+    }
+  }
+
+  // ==================== 비디오 이벤트 리스너 ====================
+
+  private setupVideoEventListeners(): void {
+    // 핸들러를 바인딩하여 저장 (나중에 제거할 수 있도록)
+    this.boundHandlers = {
+      pause: this.handlePause.bind(this),
+      playing: this.handlePlaying.bind(this),
+      seeked: this.handleSeeked.bind(this),
+      ratechange: this.handleRatechange.bind(this)
+    };
+
+    this.video.addEventListener('pause', this.boundHandlers.pause);
+    this.video.addEventListener('playing', this.boundHandlers.playing);
+    this.video.addEventListener('seeked', this.boundHandlers.seeked);
+    this.video.addEventListener('ratechange', this.boundHandlers.ratechange);
+  }
+
+  private removeVideoEventListeners(): void {
+    if (!this.boundHandlers) return;
+
+    this.video.removeEventListener('pause', this.boundHandlers.pause);
+    this.video.removeEventListener('playing', this.boundHandlers.playing);
+    this.video.removeEventListener('seeked', this.boundHandlers.seeked);
+    this.video.removeEventListener('ratechange', this.boundHandlers.ratechange);
+
+    this.boundHandlers = null;
+    console.log(`[LoopController #${this.instanceId}] 비디오 이벤트 리스너 제거 완료`);
+  }
+
+  private handlePause(): void {
+    const now = performance.now();
+    const timeSinceJumpCompleted = now - this.jumpCompletedAt;
+
+    console.log(`[LoopController #${this.instanceId}] pause 이벤트:`, {
+      isJumping: this.isJumping,
+      timeSinceJumpCompleted: timeSinceJumpCompleted.toFixed(1),
+      scheduledNodesCount: this.scheduledNodes.length
     });
 
-    // 비디오 재생 시 메트로놈 재시작
-    // 'playing' 이벤트 사용: 실제로 재생이 시작된 후 발생하므로 타이밍이 더 정확함
-    // 'play' 이벤트는 재생 요청 시점에 발생하여 실제 재생과 수십~수백ms 차이 발생 가능
-    this.video.addEventListener('playing', () => {
-      // 카운트인 중에는 메트로놈 자동 시작 안함 (카운트인 완료 후 시작됨)
-      if (this.countInActive) {
-        return;
-      }
+    // 루프 점프 중에는 pause 이벤트 무시 (YouTube가 seek 시 잠시 pause 발생)
+    if (this.isJumping) {
+      console.log('[LoopController] 루프 점프 중이므로 pause 무시');
+      return;
+    }
 
-      // 루프 점프 중에는 메트로놈 재시작 안함 (resync만 사용)
-      // video.currentTime 변경 시 playing 이벤트가 다시 발생할 수 있음
-      if (this.isJumping) {
-        console.log('[LoopController] playing 이벤트 무시 (루프 점프 중)');
-        return;
-      }
+    // 점프 완료 직후 100ms 이내의 pause도 무시 (YouTube의 지연된 pause 이벤트)
+    if (timeSinceJumpCompleted < 100) {
+      console.log('[LoopController] 루프 점프 직후이므로 pause 무시');
+      return;
+    }
 
-      // 메트로놈이 이미 실행 중이면 재시작하지 않음
-      if (this.metronome.isRunning()) {
-        console.log('[LoopController] playing 이벤트 무시 (메트로놈 이미 실행 중)');
-        return;
-      }
+    this.cancelAllScheduled();
+  }
 
-      if (this.globalSyncMetronomeActive) {
-        this.startGlobalSyncMetronome();
-      } else if (this.active?.metronomeEnabled) {
-        this.startMetronome();
-      }
+  private handlePlaying(): void {
+    console.log(`[LoopController #${this.instanceId}] playing 이벤트:`, {
+      countInActive: this.countInActive,
+      isJumping: this.isJumping,
+      globalSyncMetronomeActive: this.globalSyncMetronomeActive,
+      metronomeEnabled: this.metronomeEnabled,
+      activeId: this.active?.id,
+      scheduledNodesCount: this.scheduledNodes.length
     });
 
-    // 메트로놈에 루프 점프 콜백 설정
-    // 메트로놈이 10ms마다 video.currentTime을 체크하므로
-    // RAF(16ms)나 timeupdate(250ms)보다 빠르게 loopEnd 도달을 감지
-    this.metronome.setOnLoopJumpRequest((start) => {
-      this.handleLoopJump(start);
+    if (this.countInActive || this.isJumping) return;
+
+    if (this.metronomeEnabled || this.globalSyncMetronomeActive) {
+      // ✅ 중복 스케줄링 방지: 기존 스케줄이 있으면 스킵
+      if (this.scheduledNodes.length > 0) {
+        console.log('[LoopController] playing: 이미 스케줄된 비트가 있어 스킵');
+        return;
+      }
+      this.scheduleBeatsFrom(this.video.currentTime);
+    }
+  }
+
+  private handleSeeked(): void {
+    console.log(`[LoopController #${this.instanceId}] seeked 이벤트:`, {
+      countInActive: this.countInActive,
+      isJumping: this.isJumping,
+      metronomeEnabled: this.metronomeEnabled,
+      globalSyncMetronomeActive: this.globalSyncMetronomeActive,
+      currentTime: this.video.currentTime.toFixed(3)
+    });
+    if (this.countInActive || this.isJumping) return;
+    if (!this.metronomeEnabled && !this.globalSyncMetronomeActive) return;
+
+    this.cancelAllScheduled();
+    if (!this.video.paused) {
+      this.scheduleBeatsFrom(this.video.currentTime);
+    }
+  }
+
+  private handleRatechange(): void {
+    console.log(`[LoopController #${this.instanceId}] ratechange 이벤트:`, {
+      newRate: this.video.playbackRate,
+      countInActive: this.countInActive,
+      isJumping: this.isJumping
+    });
+    if (this.countInActive || this.isJumping) return;
+    if (!this.metronomeEnabled && !this.globalSyncMetronomeActive) return;
+
+    this.cancelAllScheduled();
+    if (!this.video.paused) {
+      this.scheduleBeatsFrom(this.video.currentTime);
+    }
+  }
+
+  // ==================== 스케줄링 ====================
+
+  // 루프 비활성화 시 최대 스케줄링 시간 (초)
+  private readonly MAX_SCHEDULE_AHEAD = 30;
+
+  /**
+   * 현재 시점부터 루프 범위 내 모든 비트 스케줄링
+   */
+  private scheduleBeatsFrom(videoTimeA: number): void {
+    if (this.isScheduling) return;
+    this.isScheduling = true;
+
+    const beatMap = this.getActiveBeatMap();
+    if (!beatMap) {
+      console.log('[LoopController] BeatMap 없음, 스케줄링 스킵');
+      this.isScheduling = false;
+      return;
+    }
+
+    // ✅ 스케줄 누적 방지: 새 스케줄링 전에 기존 스케줄 정리
+    const prevScheduledCount = this.scheduledNodes.length;
+    if (prevScheduledCount > 0) {
+      console.log('[LoopController] 기존 스케줄 정리:', { prevScheduledCount });
+      this.cancelAllScheduled();
+    }
+
+    const audioTimeA = this.metronome.getAudioContext().currentTime;
+    const playbackRate = this.video.playbackRate;
+
+    // ✅ 루프 비활성화 시 전체 비디오가 아닌 30초만 스케줄링 (성능 문제 방지)
+    let endTime: number;
+    if (this.loopEnd !== Infinity) {
+      endTime = this.loopEnd;
+    } else {
+      endTime = Math.min(videoTimeA + this.MAX_SCHEDULE_AHEAD, this.video.duration);
+    }
+
+    // 루프 범위 내 비트 조회
+    const beatsInRange = beatMap.getBeatsInRange(videoTimeA, endTime);
+
+    // 첫 몇 개 비트 확인용 로그
+    const firstBeats = beatsInRange.slice(0, 5).map(b => ({
+      videoTime: b.videoTime.toFixed(3),
+      beatNumber: b.beatNumber
+    }));
+
+    console.log('[LoopController] 스케줄링 시작:', {
+      videoTimeA: videoTimeA.toFixed(3),
+      audioTimeA: audioTimeA.toFixed(3),
+      playbackRate,
+      loopRange: [this.loopStart, this.loopEnd],
+      endTime: endTime.toFixed(3),
+      beatsCount: beatsInRange.length,
+      beatMapOffset: beatMap.beatOffset.toFixed(3),
+      firstBeats
+    });
+
+    // 각 비트 스케줄링
+    const ctxCurrentTime = this.metronome.getAudioContext().currentTime;
+    let scheduledCount = 0;
+
+    for (const beat of beatsInRange) {
+      const deltaVideo = beat.videoTime - videoTimeA;
+      const audioTime = audioTimeA + (deltaVideo / playbackRate);
+      const timeUntilBeat = audioTime - ctxCurrentTime;
+
+      // ✅ 첫 비트가 50ms 이내로 지났으면 즉시 재생 (seek/0초 시작 오차 보정)
+      if (timeUntilBeat < 0 && timeUntilBeat > -0.050) {
+        console.log(`[LoopController] 비트 즉시 재생 (오차 보정): beat ${beat.beatNumber}, late=${(-timeUntilBeat * 1000).toFixed(1)}ms`);
+        this.metronome.playClickNow(beat.isDownbeat);
+        scheduledCount++;
+      } else {
+        const nodes = this.metronome.scheduleBeatAt(audioTime, beat.isDownbeat);
+        if (nodes) {
+          this.scheduledNodes.push(nodes);
+          scheduledCount++;
+        }
+      }
+
+      // UI 콜백은 setTimeout으로 호출 (비동기)
+      if (this.beatDisplayCallback) {
+        const delayMs = Math.max(0, (audioTime - audioTimeA) * 1000);
+        const timerId = window.setTimeout(() => {
+          console.log(`[Beat UI] 현재 루프 - beat: ${beat.beatNumber}/${beatMap.beatsPerBar}, videoTime: ${beat.videoTime.toFixed(3)}, delayMs: ${delayMs.toFixed(1)}`);
+          this.beatDisplayCallback?.(beat.beatNumber, beatMap.beatsPerBar);
+        }, delayMs);
+        this.beatDisplayTimers.push(timerId);
+      }
+    }
+
+    console.log(`[LoopController] 스케줄 완료: ${scheduledCount}/${beatsInRange.length}개 비트`);
+
+    // 루프 점프 스케줄링 (루프 활성화된 경우)
+    if (this.loopEnd !== Infinity && this.active) {
+      this.scheduleLoopJump(videoTimeA, audioTimeA, playbackRate, beatMap);
+    } else if (this.loopEnd === Infinity && endTime < this.video.duration) {
+      // ✅ 루프 비활성화 시: 30초 후 추가 스케줄링 예약
+      this.scheduleContinueScheduling(endTime, playbackRate);
+    }
+
+    this.isScheduling = false;
+  }
+
+  /**
+   * 연속 스케줄링 예약 (루프 없이 30초 이상 재생 시)
+   */
+  private scheduleContinueScheduling(nextVideoTime: number, playbackRate: number): void {
+    // 기존 타이머 취소
+    if (this.continueScheduleTimer !== null) {
+      clearTimeout(this.continueScheduleTimer);
+    }
+
+    // 현재 비디오 시간 기준으로 다음 스케줄링까지 대기 시간 계산
+    const currentVideoTime = this.video.currentTime;
+    const deltaVideo = nextVideoTime - currentVideoTime;
+    // 25초 후에 미리 스케줄링 (5초 여유)
+    const delayMs = Math.max(0, (deltaVideo / playbackRate) * 1000 - 5000);
+
+    console.log('[LoopController] 연속 스케줄링 예약:', {
+      currentVideoTime: currentVideoTime.toFixed(3),
+      nextVideoTime: nextVideoTime.toFixed(3),
+      delayMs: delayMs.toFixed(1),
+      playbackRate
+    });
+
+    this.continueScheduleTimer = window.setTimeout(() => {
+      this.continueScheduleTimer = null;
+
+      // 재생 중이고 메트로놈이 활성화된 경우에만 스케줄링
+      if (!this.video.paused && (this.metronomeEnabled || this.globalSyncMetronomeActive)) {
+        console.log('[LoopController] 연속 스케줄링 실행:', {
+          videoCurrentTime: this.video.currentTime.toFixed(3),
+          globalSyncMetronomeActive: this.globalSyncMetronomeActive,
+          metronomeEnabled: this.metronomeEnabled
+        });
+        this.scheduleBeatsFrom(this.video.currentTime);
+      } else {
+        console.log('[LoopController] 연속 스케줄링 스킵 (정지 또는 메트로놈 비활성화):', {
+          paused: this.video.paused,
+          globalSyncMetronomeActive: this.globalSyncMetronomeActive,
+          metronomeEnabled: this.metronomeEnabled
+        });
+      }
+    }, delayMs);
+  }
+
+  /**
+   * 루프 점프 스케줄링 (점프 타이머만 - 비트는 seeked 후 스케줄)
+   */
+  private scheduleLoopJump(
+    videoTimeA: number,
+    audioTimeA: number,
+    playbackRate: number,
+    beatMap: BeatMap
+  ): void {
+    // ⚠️ 진단 로그: 이전 타이머가 있는지 확인
+    if (this.loopJumpTimer !== null) {
+      console.warn('[LoopController] ⚠️ 이전 loopJumpTimer가 아직 존재함! 취소하고 새로 스케줄', {
+        existingTimerId: this.loopJumpTimer
+      });
+      clearTimeout(this.loopJumpTimer);
+    }
+
+    // 루프 점프 시점 = loopEnd
+    const deltaToLoopEnd = this.loopEnd - videoTimeA;
+    const audioTimeLoopEnd = audioTimeA + (deltaToLoopEnd / playbackRate);
+
+    // 루프 점프 실행 스케줄 (비트는 seeked 후에 스케줄)
+    const delayMs = (audioTimeLoopEnd - audioTimeA) * 1000;
+    const timerId = window.setTimeout(() => {
+      this.executeLoopJump(playbackRate, beatMap);
+    }, Math.max(0, delayMs - 10)); // 10ms 여유를 두고 실행
+    this.loopJumpTimer = timerId;
+
+    console.log('[LoopController] 루프 점프 스케줄:', {
+      loopEnd: this.loopEnd.toFixed(3),
+      audioTimeLoopEnd: audioTimeLoopEnd.toFixed(3),
+      delayMs: delayMs.toFixed(1),
+      timerId
+    });
+  }
+
+  // seeked 리스너 추적용
+  private currentSeekedListener: (() => void) | null = null;
+  private seekedListenerIdCounter: number = 0;
+
+  /**
+   * 루프 점프 실행 (seeked 이벤트에서 비트 스케줄링)
+   */
+  private executeLoopJump(playbackRate: number, beatMap: BeatMap): void {
+    if (this.video.paused) return;
+
+    // ✅ 루프가 비활성화되었으면 점프 실행하지 않음
+    if (this.loopEnd === Infinity || !this.active) {
+      console.log('[LoopController] executeLoopJump 스킵: 루프 비활성화됨', {
+        loopEnd: this.loopEnd,
+        activeId: this.active?.id
+      });
+      this.loopJumpTimer = null;
+      return;
+    }
+
+    this.isJumping = true;
+    const jumpAudioTime = this.metronome.getAudioContext().currentTime;
+
+    // ⚠️ 진단: 이전 seeked 리스너가 있는지 확인
+    if (this.currentSeekedListener) {
+      console.warn('[LoopController] ⚠️ 이전 seeked 리스너가 아직 존재함! 제거하고 새로 등록');
+      this.video.removeEventListener('seeked', this.currentSeekedListener);
+      this.currentSeekedListener = null;
+    }
+
+    console.log(`[LoopController #${this.instanceId}] 루프 점프 실행 (seek 전): → ${this.loopStart.toFixed(3)}s`, {
+      jumpAudioTime: jumpAudioTime.toFixed(3),
+      videoCurrentTime: this.video.currentTime.toFixed(3),
+      playbackRate,
+      loopRange: [this.loopStart.toFixed(3), this.loopEnd.toFixed(3)],
+      scheduledNodesCount: this.scheduledNodes.length,
+      loopJumpTimerId: this.loopJumpTimer
+    });
+
+    // ✅ 핵심: 이전 루프의 스케줄된 비트들 취소 (누적 방지)
+    // 루프 점프 타이머는 유지하고, 비트 노드와 UI 타이머만 취소
+    for (const nodes of this.scheduledNodes) {
+      cancelScheduledBeat(nodes);
+    }
+    this.scheduledNodes = [];
+    for (const timerId of this.beatDisplayTimers) {
+      clearTimeout(timerId);
+    }
+    this.beatDisplayTimers = [];
+
+    // loopJumpTimer 초기화 (실행되었으므로)
+    this.loopJumpTimer = null;
+
+    this.video.currentTime = this.loopStart;
+
+    console.log(`[LoopController #${this.instanceId}] 루프 점프 실행 (seek 후):`, {
+      videoCurrentTime: this.video.currentTime.toFixed(3),
+      loopStart: this.loopStart.toFixed(3),
+      audioTimeNow: this.metronome.getAudioContext().currentTime.toFixed(3)
+    });
+
+    // seeked 이벤트 한 번만 처리
+    const listenerId = ++this.seekedListenerIdCounter;
+    const onSeeked = () => {
+      const seekedAudioTime = this.metronome.getAudioContext().currentTime;
+      const currentPlaybackRate = this.video.playbackRate;
+
+      console.log(`[LoopController #${this.instanceId}] onSeeked (루프점프): seeked 이벤트 수신`, {
+        listenerId,
+        jumpAudioTime: jumpAudioTime.toFixed(3),
+        seekedAudioTime: seekedAudioTime.toFixed(3),
+        seekDelay: (seekedAudioTime - jumpAudioTime).toFixed(3),
+        videoCurrentTime: this.video.currentTime.toFixed(3)
+      });
+
+      this.video.removeEventListener('seeked', onSeeked);
+      this.currentSeekedListener = null;
+
+      // ✅ 핵심 수정: seeked 완료 후 현재 시점 기준으로 비트 스케줄링
+      this.scheduleCurrentLoopBeats(seekedAudioTime, currentPlaybackRate, beatMap);
+
+      // 다음 루프 점프 스케줄링 (루프가 아직 활성화된 경우에만)
+      if (this.loopEnd !== Infinity && this.active) {
+        this.scheduleLoopJump(this.loopStart, seekedAudioTime, currentPlaybackRate, beatMap);
+      } else {
+        console.log('[LoopController] 루프 비활성화됨, 다음 루프 점프 스케줄링 스킵');
+      }
+
+      // isJumping 해제 (약간 대기)
+      setTimeout(() => {
+        this.isJumping = false;
+        this.jumpCompletedAt = performance.now();
+        console.log('[LoopController] isJumping 해제, jumpCompletedAt 설정');
+      }, 20);
+    };
+
+    this.currentSeekedListener = onSeeked;
+    this.video.addEventListener('seeked', onSeeked);
+    console.log(`[LoopController] seeked 리스너 등록 완료: listenerId=${listenerId}`);
+  }
+
+  /**
+   * 현재 루프의 비트 스케줄링 (seeked 후 호출)
+   */
+  private scheduleCurrentLoopBeats(
+    audioTimeA: number,
+    playbackRate: number,
+    beatMap: BeatMap
+  ): void {
+    const videoTimeA = this.video.currentTime;
+    const endTime = this.loopEnd !== Infinity ? this.loopEnd : this.video.duration;
+    const ctx = this.metronome.getAudioContext();
+    const ctxCurrentTime = ctx.currentTime;
+
+    // 루프 범위 내 비트 조회
+    // ✅ loopStart를 기준으로 조회 (seek 후 video.currentTime이 약간 다를 수 있음)
+    // 단, videoTimeA보다 약간 앞의 비트도 포함 (50ms 여유)
+    const queryStart = Math.max(0, Math.min(videoTimeA, this.loopStart) - 0.05);
+    const beatsInRange = beatMap.getBeatsInRange(queryStart, endTime);
+
+    // 첫 비트까지의 시간 계산
+    const firstBeatVideoTime = beatsInRange[0]?.videoTime;
+    const timeUntilFirstBeat = firstBeatVideoTime !== undefined
+      ? firstBeatVideoTime - videoTimeA
+      : null;
+
+    console.log('[LoopController] scheduleCurrentLoopBeats: 비트 스케줄링', {
+      videoTimeA: videoTimeA.toFixed(3),
+      queryStart: queryStart.toFixed(3),
+      audioTimeA: audioTimeA.toFixed(3),
+      ctxCurrentTime: ctxCurrentTime.toFixed(3),
+      audioTimeAvsCtx: (audioTimeA - ctxCurrentTime).toFixed(3),
+      playbackRate,
+      loopRange: [this.loopStart.toFixed(3), this.loopEnd.toFixed(3)],
+      beatsCount: beatsInRange.length,
+      firstBeatVideoTime: firstBeatVideoTime?.toFixed(3) || 'none',
+      timeUntilFirstBeat: timeUntilFirstBeat?.toFixed(3) || 'none',
+      beatMapOffset: beatMap.beatOffset.toFixed(3)
+    });
+
+    // ⚠️ 첫 비트까지 2초 이상 걸리면 경고
+    if (timeUntilFirstBeat !== null && timeUntilFirstBeat > 2) {
+      console.warn('[LoopController] ⚠️ 첫 비트까지 시간이 깁니다:', {
+        loopStart: this.loopStart.toFixed(3),
+        firstBeatVideoTime: firstBeatVideoTime?.toFixed(3),
+        timeUntilFirstBeat: timeUntilFirstBeat.toFixed(3),
+        beatMapOffset: beatMap.beatOffset.toFixed(3),
+        suggestion: 'BeatMap offset이 루프 시작점과 맞지 않을 수 있음'
+      });
+    }
+
+    let scheduledCount = 0;
+    let skippedCount = 0;
+
+    // 각 비트 스케줄링
+    for (const beat of beatsInRange) {
+      const deltaVideo = beat.videoTime - videoTimeA;
+      const audioTime = audioTimeA + (deltaVideo / playbackRate);
+      const timeUntilBeat = audioTime - ctxCurrentTime;
+
+      let nodes: ScheduledBeatNodes | null = null;
+
+      // ✅ 첫 비트가 10ms 이내로 지났으면 즉시 재생 (seek 오차 보정)
+      if (timeUntilBeat < 0 && timeUntilBeat > -0.010) {
+        console.log(`[LoopController] 첫 비트 즉시 재생 (seek 오차 보정): beat ${beat.beatNumber}, late=${(-timeUntilBeat * 1000).toFixed(1)}ms`);
+        this.metronome.playClickNow(beat.isDownbeat);
+        scheduledCount++;
+      } else {
+        nodes = this.metronome.scheduleBeatAt(audioTime, beat.isDownbeat);
+        if (nodes) {
+          this.scheduledNodes.push(nodes);
+          scheduledCount++;
+        } else {
+          skippedCount++;
+          // 첫 몇 개의 스킵된 비트만 로그
+          if (skippedCount <= 3) {
+            console.warn(`[LoopController] 비트 스킵됨: beat ${beat.beatNumber}, audioTime=${audioTime.toFixed(3)}, timeUntilBeat=${timeUntilBeat.toFixed(3)}`);
+          }
+        }
+      }
+
+      // UI 콜백
+      if (this.beatDisplayCallback) {
+        const delayMs = (audioTime - audioTimeA) * 1000;
+        const timerId = window.setTimeout(() => {
+          console.log(`[Beat UI] 루프점프 후 - beat: ${beat.beatNumber}/${beatMap.beatsPerBar}, videoTime: ${beat.videoTime.toFixed(3)}, delayMs: ${delayMs.toFixed(1)}`);
+          this.beatDisplayCallback?.(beat.beatNumber, beatMap.beatsPerBar);
+        }, Math.max(0, delayMs));
+        this.beatDisplayTimers.push(timerId);
+      }
+    }
+
+    console.log('[LoopController] scheduleCurrentLoopBeats 완료:', {
+      scheduledCount,
+      skippedCount,
+      totalScheduledNodes: this.scheduledNodes.length
     });
   }
 
   /**
-   * 루프 점프 처리 (메트로놈에서 호출)
+   * 다음 루프용 스케줄 취소 (루프 점프 시 호출)
    */
-  private handleLoopJump(start: number): void {
-    if (this.isJumping) return; // 중복 호출 방지
-    this.isJumping = true;
+  private cancelNextLoopScheduled(): void {
+    console.log('[LoopController] cancelNextLoopScheduled: 다음 루프 스케줄 취소', {
+      nodesCount: this.nextLoopScheduledNodes.length,
+      timersCount: this.nextLoopBeatTimers.length
+    });
 
-    console.log(`[LoopController] 루프 점프: → ${start.toFixed(3)}s`);
-    this.video.currentTime = start;
-    this.metronome.resync(start);
+    // 다음 루프 오디오 노드 취소
+    for (const nodes of this.nextLoopScheduledNodes) {
+      cancelScheduledBeat(nodes);
+    }
+    this.nextLoopScheduledNodes = [];
 
-    // 다음 프레임에서 플래그 해제
-    requestAnimationFrame(() => {
-      this.isJumping = false;
+    // 다음 루프 UI 콜백 타이머 취소
+    for (const timerId of this.nextLoopBeatTimers) {
+      clearTimeout(timerId);
+    }
+    this.nextLoopBeatTimers = [];
+  }
+
+  /**
+   * 모든 스케줄된 오디오 취소
+   */
+  private cancelAllScheduled(): void {
+    const cancelInfo = {
+      scheduledNodesCount: this.scheduledNodes.length,
+      nextLoopNodesCount: this.nextLoopScheduledNodes.length,
+      hasLoopJumpTimer: this.loopJumpTimer !== null,
+      hasContinueScheduleTimer: this.continueScheduleTimer !== null,
+      beatDisplayTimersCount: this.beatDisplayTimers.length
+    };
+    console.log('[LoopController] cancelAllScheduled: 모든 스케줄 취소', cancelInfo);
+
+    // 오디오 노드 취소
+    for (const nodes of this.scheduledNodes) {
+      cancelScheduledBeat(nodes);
+    }
+    this.scheduledNodes = [];
+
+    // 다음 루프용도 취소
+    this.cancelNextLoopScheduled();
+
+    // 루프 점프 타이머 취소
+    if (this.loopJumpTimer !== null) {
+      clearTimeout(this.loopJumpTimer);
+      this.loopJumpTimer = null;
+    }
+
+    // 연속 스케줄링 타이머 취소
+    if (this.continueScheduleTimer !== null) {
+      clearTimeout(this.continueScheduleTimer);
+      this.continueScheduleTimer = null;
+    }
+
+    // UI 콜백 타이머 취소
+    for (const timerId of this.beatDisplayTimers) {
+      clearTimeout(timerId);
+    }
+    this.beatDisplayTimers = [];
+  }
+
+  // ==================== BeatMap 관리 ====================
+
+  /**
+   * 현재 활성 BeatMap 반환
+   */
+  private getActiveBeatMap(): BeatMap | null {
+    const useLocal = this.active?.useGlobalSync === false;
+    const beatMap = useLocal
+      ? this.localBeatMaps.get(this.active!.id) || null
+      : this.globalBeatMap;
+    console.log('[LoopController] getActiveBeatMap:', {
+      useLocal,
+      activeId: this.active?.id,
+      hasBeatMap: beatMap !== null,
+      bpm: beatMap?.bpm,
+      beatsPerBar: beatMap?.beatsPerBar
+    });
+    return beatMap;
+  }
+
+  /**
+   * 글로벌 BeatMap 업데이트 (Beat Sync 완료 시 호출)
+   */
+  updateGlobalBeatMap(): void {
+    // 오프셋이 0일 수 있으므로 undefined 체크 사용
+    if (!this.profile.tempo || !this.profile.timeSignature || this.profile.globalMetronomeOffset === undefined) {
+      this.globalBeatMap = null;
+      return;
+    }
+
+    const [beatsPerBar] = parseTimeSignature(this.profile.timeSignature);
+    this.globalBeatMap = new BeatMap(
+      this.profile.tempo,
+      this.profile.globalMetronomeOffset,
+      beatsPerBar,
+      this.video.duration || 3600 // 기본 1시간
+    );
+
+    console.log('[LoopController] 글로벌 BeatMap 업데이트:', {
+      bpm: this.profile.tempo,
+      offset: this.profile.globalMetronomeOffset,
+      beatsPerBar,
+      totalBeats: this.globalBeatMap.length
     });
   }
+
+  /**
+   * 로컬 BeatMap 업데이트 (세그먼트별 Beat Sync 완료 시 호출)
+   */
+  updateLocalBeatMap(segmentId: string): void {
+    const segment = this.profile.segments.find(s => s.id === segmentId);
+    if (!segment) return;
+
+    if (!segment.localTempo || !segment.localTimeSignature || segment.localMetronomeOffset === undefined) {
+      this.localBeatMaps.delete(segmentId);
+      return;
+    }
+
+    const [beatsPerBar] = parseTimeSignature(segment.localTimeSignature);
+    const beatMap = new BeatMap(
+      segment.localTempo,
+      segment.localMetronomeOffset,
+      beatsPerBar,
+      this.video.duration || 3600
+    );
+
+    this.localBeatMaps.set(segmentId, beatMap);
+
+    console.log('[LoopController] 로컬 BeatMap 업데이트:', {
+      segmentId,
+      bpm: segment.localTempo,
+      offset: segment.localMetronomeOffset,
+      beatsPerBar,
+      totalBeats: beatMap.length
+    });
+  }
+
+  // ==================== Profile 관리 ====================
 
   setProfile(profile: VideoProfile): void {
     this.profile = profile;
-    console.log('LoopController setProfile:', {
-      activeSegmentId: profile.activeSegmentId,
-      segmentsCount: profile.segments.length
-    });
-    // 활성 구간 상태도 함께 업데이트 (profile.activeSegmentId 사용)
+
+    // BeatMap 업데이트
+    this.updateGlobalBeatMap();
+
     if (profile.activeSegmentId) {
       const foundSegment = profile.segments.find(s => s.id === profile.activeSegmentId);
-      console.log('setProfile에서 찾은 구간:', foundSegment);
       this.active = foundSegment || undefined;
 
-      // 중요: 메트로놈 루프 범위를 즉시 업데이트해야 함
-      // 메트로놈이 10ms마다 폴링하므로, 이전 루프 범위로 점프 감지가 발생하지 않도록
       if (this.active) {
-        this.metronome.setLoopRange(this.active.start, this.active.end);
-        // 주의: 여기서 resync()를 호출하면 안 됨
-        // video.currentTime이 아직 이전 위치일 수 있음
-        // resync()는 video.currentTime 변경 후 jumpAndActivateSegment에서 처리됨
+        this.loopStart = this.active.start;
+        this.loopEnd = this.active.end;
+
+        const effectiveSync = this.getEffectiveSync(this.active);
+        this.metronomeEnabled = !!(this.active.metronomeEnabled && effectiveSync.tempo && effectiveSync.timeSignature);
       }
     } else {
       this.active = undefined;
-      // 루프 비활성화 시 메트로놈 중지 및 범위 해제
-      this.metronome.clearLoopRange();
-      if (this.metronome.isRunning()) {
-        this.stopMetronome();
+      this.loopStart = 0;
+      this.loopEnd = Infinity;
+
+      if (!this.globalSyncMetronomeActive) {
+        this.metronomeEnabled = false;
+        this.cancelAllScheduled();
+      } else {
+        // ✅ 글로벌 싱크 메트로놈이 활성화되어 있으면 현재 위치부터 재스케줄링
+        if (!this.video.paused) {
+          console.log('[LoopController] setProfile: 루프 비활성화됨, 글로벌 메트로놈 계속 재생');
+          this.cancelAllScheduled();
+          this.scheduleBeatsFrom(this.video.currentTime);
+        }
       }
     }
 
     this.applyActiveRate();
-
-    // 디버깅 로그
-    if (this.active) {
-      console.log(`setProfile 후 루프 활성화: ${this.active.label} (${this.active.start}s ~ ${this.active.end}s)`);
-    } else {
-      console.log('setProfile 후 루프 비활성화');
-    }
   }
 
   setActive(id?: string | null): void {
-    console.log('setActive 호출됨:', { id, segmentsCount: this.profile.segments.length });
+    console.log(`[LoopController] setActive (빌드: ${BUILD_ID}):`, { id, globalSync: this.globalSyncMetronomeActive });
 
-    // profile 객체를 직접 수정하지 않고 activeSegmentId만 업데이트
+    // 기존 스케줄 취소
+    this.cancelAllScheduled();
+
     if (id) {
       const foundSegment = this.profile.segments.find(s => s.id === id);
-      console.log('찾은 구간:', foundSegment);
       this.active = foundSegment || undefined;
     } else {
       this.active = undefined;
@@ -150,33 +791,31 @@ export class LoopController {
 
     this.applyActiveRate();
 
-    // 메트로놈 처리 (루프 점프는 메트로놈이 10ms마다 감지)
     if (this.active) {
-      console.log(`루프 활성화: ${this.active.label} (${this.active.start}s ~ ${this.active.end}s)`);
+      this.loopStart = this.active.start;
+      this.loopEnd = this.active.end;
 
-      // 중요: 메트로놈 루프 범위를 가장 먼저 설정해야 함
-      // 메트로놈이 10ms마다 폴링하므로, 이전 루프 범위로 점프 감지가 발생하지 않도록
-      // 새 루프 범위를 즉시 설정
-      this.metronome.setLoopRange(this.active.start, this.active.end);
-
-      // 메트로놈이 이미 실행 중이면 새 루프 범위에 맞게 resync
-      // (더블비트 방지를 위해 resync 사용)
-      if (this.metronome.isRunning()) {
-        this.metronome.resync(this.video.currentTime);
+      if (!this.globalSyncMetronomeActive) {
+        const effectiveSync = this.getEffectiveSync(this.active);
+        this.metronomeEnabled = !!(this.active.metronomeEnabled && effectiveSync.tempo && effectiveSync.timeSignature);
       }
 
-      // 메트로놈이 활성화되어 있고 비디오가 재생 중이면 시작
-      // (이미 실행 중이면 위에서 resync만 수행)
-      if (this.active.metronomeEnabled && !this.video.paused && !this.metronome.isRunning()) {
-        this.startMetronome();
+      // 재생 중이면 스케줄링 시작
+      if (!this.video.paused && (this.metronomeEnabled || this.globalSyncMetronomeActive)) {
+        this.scheduleBeatsFrom(this.video.currentTime);
       }
     } else {
-      console.log('루프 비활성화');
+      this.loopStart = 0;
+      this.loopEnd = Infinity;
 
-      // 루프 비활성화 시 메트로놈 중지 및 루프 범위 해제
-      this.metronome.clearLoopRange();
-      if (this.metronome.isRunning()) {
-        this.stopMetronome();
+      if (!this.globalSyncMetronomeActive) {
+        this.metronomeEnabled = false;
+      }
+
+      // ✅ 글로벌 싱크 메트로놈이 활성화되어 있으면 현재 위치부터 재스케줄링
+      if (this.globalSyncMetronomeActive && !this.video.paused) {
+        console.log('[LoopController] 루프 비활성화됨, 글로벌 메트로놈 계속 재생');
+        this.scheduleBeatsFrom(this.video.currentTime);
       }
     }
   }
@@ -189,125 +828,168 @@ export class LoopController {
     return this.profile;
   }
 
-  tick(): void {
-    if (!this.active) {
-      return;
+  // ==================== 메트로놈 관리 ====================
+
+  toggleMetronome(segmentId: string): boolean {
+    const segment = this.profile.segments.find(s => s.id === segmentId);
+    if (!segment) return false;
+
+    segment.metronomeEnabled = !segment.metronomeEnabled;
+
+    if (this.active?.id === segmentId) {
+      const effectiveSync = this.getEffectiveSync(segment);
+      this.metronomeEnabled = !!(segment.metronomeEnabled && effectiveSync.tempo && effectiveSync.timeSignature);
+
+      // 재스케줄링
+      this.cancelAllScheduled();
+      if (!this.video.paused && this.metronomeEnabled) {
+        this.scheduleBeatsFrom(this.video.currentTime);
+      }
     }
 
-    // 최신 segment 정보를 profile에서 가져옴 (실시간 업데이트 반영)
-    const latestSegment = this.profile.segments.find(s => s.id === this.active!.id);
-    if (!latestSegment) {
-      return;
-    }
-
-    const { start, end } = latestSegment;
-
-    // start와 end 값이 유효하지 않은 경우 처리
-    if (start === undefined || start === null || isNaN(start) || typeof start !== 'number' ||
-        end === undefined || end === null || isNaN(end) || typeof end !== 'number') {
-      console.log('루프 체크: start 또는 end 값이 유효하지 않음', { start, end });
-      return;
-    }
-
-    // start가 end보다 큰 경우 처리 (무효한 구간)
-    if (start >= end) {
-      console.log('루프 체크: start가 end보다 크거나 같음 (무효한 구간)', { start, end });
-      return;
-    }
-
-    const currentTime = this.video.currentTime;
-
-    // currentTime이 유효하지 않은 경우 처리 (더 엄격한 검사)
-    if (currentTime === undefined || currentTime === null || isNaN(currentTime) || typeof currentTime !== 'number') {
-      console.log('루프 체크: currentTime이 유효하지 않음', currentTime);
-      return;
-    }
-
-    // 메트로놈이 활성화되어 있고 재생 중이면 메트로놈 시작
-    if (latestSegment.metronomeEnabled && !this.video.paused && !this.metronome.isRunning()) {
-      this.startMetronome();
-    }
-
-    // 메트로놈 루프 범위 업데이트 (글로벌 싱크 메트로놈 포함)
-    if (this.metronome.isRunning()) {
-      this.metronome.setLoopRange(start, end);
-    }
-
-    // 루프 점프는 RAF에서 처리 (더 정밀한 타이밍)
-    // tick()은 메트로놈 상태 관리만 담당
+    return segment.metronomeEnabled;
   }
 
-  // timeupdate 이벤트에서 호출
+  isMetronomeEnabled(segmentId: string): boolean {
+    const segment = this.profile.segments.find(s => s.id === segmentId);
+    return segment?.metronomeEnabled || false;
+  }
+
+  setMetronomeVolume(volume: number): void {
+    this.metronome.setVolume(volume);
+
+    // 실시간 볼륨 반영: 재생 중이고 메트로놈 활성화 상태면 재스케줄링
+    if (!this.video.paused && (this.metronomeEnabled || this.globalSyncMetronomeActive)) {
+      this.cancelAllScheduled();
+      this.scheduleBeatsFrom(this.video.currentTime);
+    }
+  }
+
+  setMetronomeBeatCallback(callback: ((beat: number, total: number) => void) | null): void {
+    this.beatDisplayCallback = callback;
+  }
+
+  // ==================== 글로벌 싱크 메트로놈 ====================
+
+  startGlobalSyncMetronome(): void {
+    if (!this.profile.tempo || !this.profile.timeSignature) {
+      console.log('[Global Sync Metronome] 시작 실패: BPM 또는 박자표 미설정');
+      return;
+    }
+
+    this.globalSyncMetronomeActive = true;
+    this.metronomeEnabled = true;
+
+    // BeatMap 업데이트
+    this.updateGlobalBeatMap();
+
+    // 루프 범위 설정
+    if (this.active) {
+      this.loopStart = this.active.start;
+      this.loopEnd = this.active.end;
+    } else {
+      this.loopStart = 0;
+      this.loopEnd = Infinity;
+    }
+
+    console.log('[Global Sync Metronome] 시작:', {
+      bpm: this.profile.tempo,
+      timeSignature: this.profile.timeSignature,
+      activeLoop: this.active?.id
+    });
+
+    // 재생 중이면 스케줄링 시작
+    if (!this.video.paused) {
+      this.scheduleBeatsFrom(this.video.currentTime);
+    }
+  }
+
+  stopGlobalSyncMetronome(): void {
+    this.globalSyncMetronomeActive = false;
+    this.metronomeEnabled = false;
+    this.cancelAllScheduled();
+    console.log('[Global Sync Metronome] 중지');
+  }
+
+  isGlobalSyncMetronomeActive(): boolean {
+    return this.globalSyncMetronomeActive;
+  }
+
+  // ==================== 루프 재생 관리 ====================
+
+  tick(): void {
+    if (!this.active) return;
+
+    const latestSegment = this.profile.segments.find(s => s.id === this.active!.id);
+    if (!latestSegment) return;
+
+    const { start, end } = latestSegment;
+    if (typeof start !== 'number' || typeof end !== 'number' || isNaN(start) || isNaN(end)) return;
+    if (start >= end) return;
+
+    // 루프 범위 업데이트 (UI에서 변경된 경우)
+    if (this.loopStart !== start || this.loopEnd !== end) {
+      this.loopStart = start;
+      this.loopEnd = end;
+
+      // 재스케줄링 필요
+      if ((this.metronomeEnabled || this.globalSyncMetronomeActive) && !this.video.paused) {
+        this.cancelAllScheduled();
+        this.scheduleBeatsFrom(this.video.currentTime);
+      }
+    }
+  }
+
   onTimeUpdate(): void {
     this.tickThrottled();
   }
 
+  // ==================== 구간 관리 ====================
+
   gotoPrevNext(dir: -1 | 1): void {
     const currentTime = this.video.currentTime;
-    
-    // currentTime이 유효하지 않은 경우 처리 (더 엄격한 검사)
-    if (currentTime === undefined || currentTime === null || isNaN(currentTime) || typeof currentTime !== 'number') {
-      console.log('gotoPrevNext: currentTime이 유효하지 않음', currentTime);
-      return;
-    }
-    
+    if (typeof currentTime !== 'number' || isNaN(currentTime)) return;
+
     const segments = [...this.profile.segments].sort((a, b) => a.start - b.start);
-    
     if (segments.length === 0) return;
 
     if (dir > 0) {
-      // 다음 구간: 현재 시간보다 큰 start 중 최소값
       const next = segments.find(s => s.start > currentTime) ?? segments[0];
       this.setActive(next?.id);
-      if (next && typeof next.start === 'number' && !isNaN(next.start)) {
+      if (next && typeof next.start === 'number') {
         this.video.currentTime = next.start;
       }
     } else {
-      // 이전 구간: 현재 시간보다 작은 start 중 최대값
       const prev = [...segments].reverse().find(s => s.start < currentTime) ?? segments[segments.length - 1];
       this.setActive(prev?.id);
-      if (prev && typeof prev.start === 'number' && !isNaN(prev.start)) {
+      if (prev && typeof prev.start === 'number') {
         this.video.currentTime = prev.start;
       }
     }
-    
+
     this.applyActiveRate();
   }
 
   applyActiveRate(): void {
-    // 안전성 검사 추가
-    const safeDefaultRate = typeof this.profile.defaultRate === 'number' && !isNaN(this.profile.defaultRate) 
-      ? this.profile.defaultRate 
+    const safeDefaultRate = typeof this.profile.defaultRate === 'number' && !isNaN(this.profile.defaultRate)
+      ? this.profile.defaultRate
       : 1.0;
-    
     const rate = this.active?.rate ?? safeDefaultRate;
     this.video.playbackRate = rate;
   }
 
-  // 현재 시간을 기준으로 구간 생성
   createSegmentFromCurrentTime(type: 'start' | 'end', label?: string): LoopSegment | null {
     const currentTime = this.video.currentTime;
-    
-    // currentTime이 유효하지 않은 경우 처리 (더 엄격한 검사)
-    if (currentTime === undefined || currentTime === null || isNaN(currentTime) || typeof currentTime !== 'number') {
-      console.log('createSegmentFromCurrentTime: currentTime이 유효하지 않음', currentTime);
-      return null;
-    }
-    
-    // 안전한 defaultRate 계산
-    const safeDefaultRate = typeof this.profile.defaultRate === 'number' && !isNaN(this.profile.defaultRate) 
-      ? this.profile.defaultRate 
+    if (typeof currentTime !== 'number' || isNaN(currentTime)) return null;
+
+    const safeDefaultRate = typeof this.profile.defaultRate === 'number' && !isNaN(this.profile.defaultRate)
+      ? this.profile.defaultRate
       : 1.0;
-    
+
     if (type === 'start') {
       const endTime = Math.min(currentTime + 10, this.video.duration);
-      
-      // endTime이 유효하지 않은 경우 처리
-      if (endTime === undefined || endTime === null || isNaN(endTime) || typeof endTime !== 'number') {
-        console.log('createSegmentFromCurrentTime: endTime이 유효하지 않음', endTime);
-        return null;
-      }
-      
+      if (typeof endTime !== 'number' || isNaN(endTime)) return null;
+
       let segmentLabel = label;
       if (!segmentLabel) {
         const startMin = Math.floor(currentTime / 60);
@@ -316,7 +998,7 @@ export class LoopController {
         const endSec = Math.floor(endTime % 60);
         segmentLabel = `${startMin.toString().padStart(2, '0')}:${startSec.toString().padStart(2, '0')}~${endMin.toString().padStart(2, '0')}:${endSec.toString().padStart(2, '0')}`;
       }
-      
+
       const segment: LoopSegment = {
         id: Math.random().toString(36).substring(2, 15),
         start: currentTime,
@@ -324,17 +1006,14 @@ export class LoopController {
         rate: safeDefaultRate,
         label: segmentLabel
       };
-      
+
       this.profile.segments.push(segment);
       return segment;
     } else {
-      // end 타입: 마지막 구간의 끝점을 현재 시간으로 설정
       const lastSegment = this.profile.segments[this.profile.segments.length - 1];
-      
       if (lastSegment && lastSegment.start < currentTime) {
         lastSegment.end = currentTime;
-        
-        // 라벨이 없거나 기본 라벨인 경우 업데이트
+
         if (!lastSegment.label || lastSegment.label.startsWith('구간 ')) {
           const startMin = Math.floor(lastSegment.start / 60);
           const startSec = Math.floor(lastSegment.start % 60);
@@ -342,138 +1021,87 @@ export class LoopController {
           const endSec = Math.floor(currentTime % 60);
           lastSegment.label = `${startMin.toString().padStart(2, '0')}:${startSec.toString().padStart(2, '0')}~${endMin.toString().padStart(2, '0')}:${endSec.toString().padStart(2, '0')}`;
         }
-        
+
         return lastSegment;
       }
     }
-    
+
     return null;
   }
 
-  // 구간 업데이트
   updateSegment(id: string, updates: Partial<LoopSegment>): boolean {
     const segment = this.profile.segments.find(s => s.id === id);
     if (!segment) return false;
 
-    // 업데이트 전 유효성 검사
     const newStart = updates.start !== undefined ? updates.start : segment.start;
     const newEnd = updates.end !== undefined ? updates.end : segment.end;
 
-    // start와 end 값이 유효한지 확인
     if (typeof newStart === 'number' && typeof newEnd === 'number' && !isNaN(newStart) && !isNaN(newEnd)) {
-      if (newStart >= newEnd) {
-        console.log('구간 업데이트 실패: start가 end보다 크거나 같음', { newStart, newEnd });
-        return false;
-      }
+      if (newStart >= newEnd) return false;
     }
 
     Object.assign(segment, updates);
 
-    // 활성 구간이 업데이트된 경우 속도 재적용 및 메트로놈 재시작
     if (this.active?.id === id) {
       this.applyActiveRate();
 
-      // start 또는 end가 변경되었고, 메트로놈이 활성화되어 있으면 재시작
-      if ((updates.start !== undefined || updates.end !== undefined) &&
-          this.active.metronomeEnabled && !this.video.paused) {
-        this.stopMetronome();
-        this.startMetronome();
+      if (updates.start !== undefined || updates.end !== undefined) {
+        this.loopStart = segment.start;
+        this.loopEnd = segment.end;
+
+        // 재스케줄링
+        if ((this.metronomeEnabled || this.globalSyncMetronomeActive) && !this.video.paused) {
+          this.cancelAllScheduled();
+          this.scheduleBeatsFrom(this.video.currentTime);
+        }
       }
     }
 
     return true;
   }
 
-  // 구간 삭제
   deleteSegment(id: string): boolean {
     const index = this.profile.segments.findIndex(s => s.id === id);
     if (index === -1) return false;
-    
+
     this.profile.segments.splice(index, 1);
-    
-    // 삭제된 구간이 활성 구간이었다면 활성 구간 해제
+    this.localBeatMaps.delete(id);
+
     if (this.active?.id === id) {
       this.setActive(null);
     }
-    
+
     return true;
   }
 
-  // 기본 재생 속도 변경
   setDefaultRate(rate: number): void {
     this.profile.defaultRate = rate;
     this.applyActiveRate();
   }
 
-  // 현재 시간이 포함된 구간 찾기
   getSegmentAtCurrentTime(): LoopSegment | undefined {
     const currentTime = this.video.currentTime;
-
-    // currentTime이 유효하지 않은 경우 처리 (더 엄격한 검사)
-    if (currentTime === undefined || currentTime === null || isNaN(currentTime) || typeof currentTime !== 'number') {
-      console.log('getSegmentAtCurrentTime: currentTime이 유효하지 않음', currentTime);
-      return undefined;
-    }
+    if (typeof currentTime !== 'number' || isNaN(currentTime)) return undefined;
 
     return this.profile.segments.find(s =>
       currentTime >= s.start && currentTime <= s.end
     );
   }
 
-  /**
-   * 메트로놈 토글 (특정 segment에 대해)
-   * @param segmentId 토글할 segment ID
-   * @returns 메트로놈 활성화 상태
-   */
-  toggleMetronome(segmentId: string): boolean {
-    const segment = this.profile.segments.find(s => s.id === segmentId);
-    if (!segment) return false;
+  // ==================== Beat Sync 설정 ====================
 
-    // segment의 메트로놈 상태 토글
-    segment.metronomeEnabled = !segment.metronomeEnabled;
-
-    // 활성 루프의 메트로놈을 토글한 경우
-    if (this.active?.id === segmentId) {
-      if (segment.metronomeEnabled) {
-        // 활성화: 재생 중이면 메트로놈 시작
-        if (!this.video.paused) {
-          this.startMetronome();
-        }
-      } else {
-        // 비활성화: 메트로놈 중지
-        this.stopMetronome();
-      }
-    }
-
-    return segment.metronomeEnabled;
-  }
-
-  /**
-   * 특정 segment의 메트로놈 활성화 상태 확인
-   */
-  isMetronomeEnabled(segmentId: string): boolean {
-    const segment = this.profile.segments.find(s => s.id === segmentId);
-    return segment?.metronomeEnabled || false;
-  }
-
-  /**
-   * 세그먼트의 유효 Beat Sync 설정을 반환합니다.
-   * 로컬 설정이 있으면 로컬, 없으면 글로벌 설정을 반환합니다.
-   */
   private getEffectiveSync(segment: LoopSegment): {
     tempo: number | undefined;
     timeSignature: string | undefined;
     offset: number | undefined;
   } {
     if (segment.useGlobalSync !== false) {
-      // 글로벌 설정 사용
       return {
         tempo: this.profile.tempo,
         timeSignature: this.profile.timeSignature,
         offset: this.profile.globalMetronomeOffset
       };
     } else {
-      // 로컬 설정 사용
       return {
         tempo: segment.localTempo,
         timeSignature: segment.localTimeSignature,
@@ -482,144 +1110,8 @@ export class LoopController {
     }
   }
 
-  /**
-   * 메트로놈 시작
-   */
-  private startMetronome(): void {
-    if (!this.active) {
-      console.log('메트로놈 시작 실패: 활성 루프 없음');
-      return;
-    }
+  // ==================== 카운트인 ====================
 
-    // 유효 Beat Sync 설정 가져오기
-    const effectiveSync = this.getEffectiveSync(this.active);
-
-    if (!effectiveSync.tempo || !effectiveSync.timeSignature) {
-      console.log('메트로놈 시작 실패: BPM 또는 박자표 미설정');
-      return;
-    }
-
-    // 오프셋 = 첫 박 시간 (video.currentTime 기준)
-    const metronomeOffset = effectiveSync.offset || 0;
-    const loopDuration = this.active.end - this.active.start;
-
-    // 루프 범위 설정 (end 이후의 박은 스케줄하지 않음)
-    this.metronome.setLoopRange(this.active.start, this.active.end);
-
-    this.metronome.start(
-      effectiveSync.tempo,
-      effectiveSync.timeSignature,
-      metronomeOffset,
-      loopDuration
-    );
-
-    console.log('메트로놈 시작 (video.currentTime 기반):', {
-      bpm: effectiveSync.tempo,
-      timeSignature: effectiveSync.timeSignature,
-      videoCurrentTime: this.video.currentTime,
-      metronomeOffset,
-      loopDuration,
-      loopRange: { start: this.active.start, end: this.active.end },
-      useGlobalSync: this.active.useGlobalSync !== false
-    });
-  }
-
-  /**
-   * 메트로놈 중지
-   */
-  private stopMetronome(): void {
-    this.metronome.stop();
-    this.metronome.clearLoopRange();
-    console.log('메트로놈 중지');
-  }
-
-  /**
-   * 글로벌 싱크 메트로놈 시작 (루프 없이)
-   * 전체 영상에 대해 글로벌 오프셋만 적용하여 메트로놈 재생
-   */
-  startGlobalSyncMetronome(): void {
-    if (!this.profile.tempo || !this.profile.timeSignature) {
-      console.log('[Global Sync Metronome] 시작 실패: BPM 또는 박자표 미설정');
-      return;
-    }
-
-    // 활성화 플래그 설정
-    this.globalSyncMetronomeActive = true;
-
-    // 글로벌 오프셋 = 첫 박 시간
-    const globalOffset = this.profile.globalMetronomeOffset || 0;
-
-    // 루프 길이 없이 메트로놈 시작 (무한 재생)
-    this.metronome.start(
-      this.profile.tempo,
-      this.profile.timeSignature,
-      globalOffset
-    );
-
-    console.log('[Global Sync Metronome] 시작 (video.currentTime 기반):', {
-      bpm: this.profile.tempo,
-      timeSignature: this.profile.timeSignature,
-      videoCurrentTime: this.video.currentTime,
-      globalOffset
-    });
-  }
-
-  /**
-   * 글로벌 싱크 메트로놈 중지
-   */
-  stopGlobalSyncMetronome(): void {
-    this.globalSyncMetronomeActive = false;
-    this.metronome.stop();
-    console.log('[Global Sync Metronome] 중지');
-  }
-
-  /**
-   * 메트로놈이 실행 중이면 resync 수행 (더블비트 방지)
-   * @param videoTime 새로운 video.currentTime
-   */
-  resyncMetronomeIfRunning(videoTime: number): void {
-    if (this.metronome.isRunning()) {
-      console.log('[LoopController] resyncMetronomeIfRunning 호출:', { videoTime });
-      this.metronome.resync(videoTime);
-    }
-  }
-
-  /**
-   * 메트로놈 볼륨 설정
-   * @param volume 볼륨 (0.0 ~ 1.0)
-   */
-  setMetronomeVolume(volume: number): void {
-    this.metronome.setVolume(volume);
-  }
-
-  /**
-   * 메트로놈 비트 콜백 설정 (UI 업데이트용)
-   * @param callback 각 박마다 호출되는 콜백 (beat: 1부터 시작, total: 총 박 수)
-   */
-  setMetronomeBeatCallback(callback: ((beat: number, total: number) => void) | null): void {
-    this.metronomeBeatCallback = callback;
-
-    // 카운트인 중이 아닐 때만 메트로놈 콜백 설정
-    if (!this.countInActive) {
-      if (callback) {
-        this.metronome.setOnBeatCallback((beatNumber, beatsPerBar) => {
-          callback(beatNumber, beatsPerBar);
-          return true; // 클릭음 재생
-        });
-      } else {
-        this.metronome.setOnBeatCallback(null);
-      }
-    }
-  }
-
-  /**
-   * 카운트인 시작 (단순화된 버전)
-   * 카운트인 = "1마디 먼저 시작하는 메트로놈"
-   *
-   * @param segmentId 루프 세그먼트 ID
-   * @param onBeat 각 박마다 호출되는 콜백 (UI 업데이트용)
-   * @param onComplete 루프 시작점 도달 시 호출되는 콜백
-   */
   startCountIn(
     segmentId: string,
     onBeat: (beat: number, total: number) => void,
@@ -631,116 +1123,24 @@ export class LoopController {
       return;
     }
 
-    // 유효 Beat Sync 설정 가져오기
     const effectiveSync = this.getEffectiveSync(segment);
     if (!effectiveSync.tempo || !effectiveSync.timeSignature) {
       console.error('[Count-In] BPM 또는 박자표 미설정');
       return;
     }
 
-    const beatsPerBar = parseInt(effectiveSync.timeSignature.split('/')[0], 10);
+    const [beatsPerBar] = parseTimeSignature(effectiveSync.timeSignature);
     const bpm = effectiveSync.tempo;
-    const beatDuration = 60 / bpm;
-    const barDuration = beatDuration * beatsPerBar;
 
-    // prerollPosition 계산: 루프 시작점에서 1마디 전
-    const prerollPosition = segment.start - barDuration;
-
-    console.log('[Count-In] 시작:', {
-      segmentId,
-      bpm,
-      beatsPerBar,
-      barDuration,
-      loopStart: segment.start,
-      prerollPosition
-    });
+    console.log('[Count-In] 시작:', { segmentId, bpm, beatsPerBar, loopStart: segment.start });
 
     this.countInActive = true;
 
-    if (prerollPosition >= 0) {
-      // Case 1: 충분한 여유 공간 - 영상 미리 재생하며 메트로놈으로 카운트인
-      console.log('[Count-In] Case 1 - 하이브리드 모드');
-
-      // 카운트인 완료 감지를 위한 상태 저장
-      this.countInTargetSegmentStart = segment.start;
-      this.countInOnComplete = onComplete;
-
-      // 루프는 아직 활성화하지 않음 (카운트인 완료 후 활성화)
-      // 메트로놈 설정: segment.start를 첫 박(downbeat)으로 설정
-      // prerollPosition에서 시작하면 beat -4, -3, -2, -1 → 0(루프시작) 순서로 재생
-
-      // 카운트인 시작 박 인덱스 저장 (UI 표시용)
-      let countInBeatCounter = 0;
-
-      this.metronome.setOnBeatCallback((beatNumber, beatsPerBar) => {
-        // 카운트인 중에는 1, 2, 3, 4 순서로 표시
-        // countInActive가 true일 때만 카운트인 번호 사용
-        if (this.countInActive) {
-          countInBeatCounter++;
-
-          // beatsPerBar를 초과하면 카운트인 완료 (beat 0 = 루프 시작)
-          if (countInBeatCounter > beatsPerBar) {
-            // 카운트인 완료 처리 (beat 0에서 호출됨)
-            // 메트로놈이 계속 재생되어야 하는지 확인
-            const segmentMetronomeEnabled = segment.metronomeEnabled || false;
-            const shouldContinueMetronome = segmentMetronomeEnabled || this.globalSyncMetronomeActive;
-
-            this.completeCountIn(segmentId);
-
-            // 메트로놈이 계속 재생되어야 하면 beat 0 클릭음도 재생
-            return shouldContinueMetronome;
-          }
-
-          // 카운트인 박 번호 (1, 2, 3, 4)
-          onBeat(countInBeatCounter, beatsPerBar);
-          return true; // 클릭음 재생
-        } else {
-          // 카운트인 완료 후에는 메트로놈의 실제 박 번호 사용
-          onBeat(beatNumber, beatsPerBar);
-          return true; // 클릭음 재생
-        }
-      });
-
-      // timeupdate 이벤트로 segment.start 도달 감지
-      this.countInTimeUpdateHandler = () => {
-        this.checkCountInComplete(segmentId);
-      };
-      this.video.addEventListener('timeupdate', this.countInTimeUpdateHandler);
-
-      // 중요: 영상 위치를 먼저 설정한 후 메트로놈 시작
-      this.video.currentTime = prerollPosition;
-
-      const loopDuration = segment.end - segment.start;
-      // startBeatIndex: -beatsPerBar - 1 = -5 (4/4의 경우)
-      // 이렇게 하면 beat -4, -3, -2, -1 총 4박이 재생됨 (beat 0은 루프 시작)
-      const startBeatIndex = -beatsPerBar - 1;
-      this.metronome.start(
-        bpm,
-        effectiveSync.timeSignature,
-        segment.start, // 루프 시작점이 첫 박 (beat 0)
-        loopDuration,
-        startBeatIndex
-      );
-
-      // 영상 재생
-      this.video.play().catch(err => console.error('[Count-In] 영상 재생 실패:', err));
-
-    } else {
-      // Case 2: 영상 시작 근처 - 타이머로 카운트인 후 영상 시작
-      console.log('[Count-In] Case 2 - 타이머 모드');
-
-      // 영상을 시작점으로 이동 (아직 재생 안 함)
-      this.video.currentTime = segment.start;
-
-      // 타이머 기반 카운트인
-      this.startTimerBasedCountIn(segment, bpm, beatsPerBar, onBeat, onComplete);
-    }
+    // 타이머 기반 카운트인 (영상 정지 상태에서)
+    this.video.currentTime = segment.start;
+    this.startTimerBasedCountIn(segment, bpm, beatsPerBar, onBeat, onComplete);
   }
 
-  /**
-   * 타이머 기반 카운트인 (prerollPosition < 0인 경우)
-   * 영상 정지 상태에서 setTimeout으로 박 재생
-   */
   private startTimerBasedCountIn(
     segment: LoopSegment,
     bpm: number,
@@ -752,100 +1152,52 @@ export class LoopController {
     let currentBeat = 0;
 
     const ctx = this.metronome.getAudioContext();
-    if (ctx.state === 'suspended') {
-      ctx.resume();
-    }
+    if (ctx.state === 'suspended') ctx.resume();
 
     const playNextBeat = () => {
       if (!this.countInActive) return;
 
       const isDownbeat = currentBeat === 0;
-
-      // 클릭음 재생
       this.metronome.playClickNow(isDownbeat);
-
-      // UI 콜백
       onBeat(currentBeat + 1, beatsPerBar);
-
       currentBeat++;
 
       if (currentBeat < beatsPerBar) {
-        // 다음 박 스케줄
         this.countInVideoStartTimer = window.setTimeout(playNextBeat, beatDuration * 1000);
       } else {
-        // 카운트인 완료 - 영상 시작 및 루프 활성화
         this.handleTimerCountInComplete(segment, onComplete);
       }
     };
 
-    // 첫 박 즉시 재생
     playNextBeat();
   }
 
-  /**
-   * 타이머 기반 카운트인 완료 후 처리
-   */
   private handleTimerCountInComplete(segment: LoopSegment, onComplete: () => void): void {
-    // 최신 segment 정보 다시 가져오기
     const latestSegment = this.profile.segments.find(s => s.id === segment.id);
     if (!latestSegment) {
       this.resetCountInState();
       return;
     }
 
-    console.log('[Count-In] 타이머 모드 완료, 루프 활성화');
-
-    // 루프 활성화
     this.setActive(latestSegment.id);
 
-    // 메트로놈 설정 및 시작
-    if (latestSegment.metronomeEnabled) {
-      const effectiveSync = this.getEffectiveSync(latestSegment);
-      if (effectiveSync.tempo && effectiveSync.timeSignature) {
-        const loopDuration = latestSegment.end - latestSegment.start;
-        this.metronome.start(
-          effectiveSync.tempo,
-          effectiveSync.timeSignature,
-          latestSegment.start,
-          loopDuration
-        );
-      }
-    }
-
-    // 영상 재생 시작
     this.video.currentTime = latestSegment.start;
-    this.video.play().catch(err => console.error('[Count-In] 영상 재생 실패:', err));
+    this.video.play().catch(err => console.error('[Count-In] 재생 실패:', err));
 
     onComplete();
     this.resetCountInState();
   }
 
-  /**
-   * 카운트인 취소
-   * @param pauseVideo 영상도 정지할지 여부 (기본: true)
-   */
   cancelCountIn(pauseVideo: boolean = true): void {
     if (!this.countInActive) return;
 
-    console.log('[Count-In] 취소 요청');
+    this.cancelAllScheduled();
 
-    // 메트로놈 중지 및 콜백 제거
-    this.metronome.stop();
-    this.metronome.setOnBeatCallback(null);
-
-    // 타이머 취소 (Case 2)
     if (this.countInVideoStartTimer !== null) {
       clearTimeout(this.countInVideoStartTimer);
       this.countInVideoStartTimer = null;
     }
 
-    // timeupdate 핸들러 제거 (Case 1)
-    if (this.countInTimeUpdateHandler) {
-      this.video.removeEventListener('timeupdate', this.countInTimeUpdateHandler);
-      this.countInTimeUpdateHandler = null;
-    }
-
-    // 영상 정지 (옵션)
     if (pauseVideo) {
       this.video.pause();
     }
@@ -853,125 +1205,23 @@ export class LoopController {
     this.resetCountInState();
   }
 
-  /**
-   * 하이브리드 모드에서 segment.start 도달 여부 확인
-   * timeupdate 이벤트에서 호출됨 (백업용)
-   */
-  private checkCountInComplete(segmentId: string): void {
-    if (!this.countInActive || this.countInTargetSegmentStart === null) {
-      return;
-    }
-
-    const currentTime = this.video.currentTime;
-
-    // segment.start에 도달했는지 확인 (약간의 허용 오차)
-    // 참고: 일반적으로 메트로놈 콜백에서 completeCountIn이 먼저 호출됨
-    if (currentTime >= this.countInTargetSegmentStart - 0.05) {
-      this.completeCountIn(segmentId);
-    }
-  }
-
-  /**
-   * 카운트인 완료 처리
-   * 메트로놈 콜백 또는 timeupdate에서 호출됨
-   */
-  private completeCountIn(segmentId: string): void {
-    if (!this.countInActive) {
-      return;
-    }
-
-    // 현재 프로필에서 세그먼트 정보를 가져와서 metronomeEnabled 확인
-    const segment = this.profile.segments.find(s => s.id === segmentId);
-    // 세그먼트별 메트로놈 설정 또는 글로벌 메트로놈 설정 확인
-    const segmentMetronomeEnabled = segment?.metronomeEnabled || false;
-    const shouldContinueMetronome = segmentMetronomeEnabled || this.globalSyncMetronomeActive;
-
-    console.log('[Count-In] 완료, 루프 활성화:', {
-      segmentId,
-      segmentMetronomeEnabled,
-      globalSyncMetronomeActive: this.globalSyncMetronomeActive,
-      shouldContinueMetronome
-    });
-
-    // timeupdate 핸들러 제거
-    if (this.countInTimeUpdateHandler) {
-      this.video.removeEventListener('timeupdate', this.countInTimeUpdateHandler);
-      this.countInTimeUpdateHandler = null;
-    }
-
-    // 카운트인 UI 콜백 제거 후 메트로놈 비트 콜백 복원
-    if (shouldContinueMetronome && this.metronomeBeatCallback) {
-      // 메트로놈이 계속 재생되고 비트 콜백이 설정되어 있으면 복원
-      const callback = this.metronomeBeatCallback;
-      this.metronome.setOnBeatCallback((beatNumber, beatsPerBar) => {
-        callback(beatNumber, beatsPerBar);
-        return true; // 클릭음 재생
-      });
-    } else {
-      this.metronome.setOnBeatCallback(null);
-    }
-
-    // 루프 활성화
-    this.setActive(segmentId);
-
-    // 메트로놈 처리: 세그먼트 또는 글로벌 메트로놈이 활성화되어 있으면 계속 재생
-    if (!shouldContinueMetronome) {
-      this.metronome.stop();
-    }
-    // shouldContinueMetronome이 true면 메트로놈은 계속 재생 (이미 시작됨)
-
-    // 완료 콜백 호출
-    if (this.countInOnComplete) {
-      this.countInOnComplete();
-    }
-
-    // 상태 초기화
-    this.resetCountInState();
-  }
-
-  /**
-   * 카운트인 상태 초기화
-   */
   private resetCountInState(): void {
     this.countInActive = false;
     this.countInVideoStartTimer = null;
-    this.countInTargetSegmentStart = null;
-    this.countInOnComplete = null;
-
-    // timeupdate 핸들러가 남아있으면 제거
-    if (this.countInTimeUpdateHandler) {
-      this.video.removeEventListener('timeupdate', this.countInTimeUpdateHandler);
-      this.countInTimeUpdateHandler = null;
-    }
-
-    this.metronome.setOnBeatCallback(null);
   }
 
-  /**
-   * 카운트인 활성화 상태 확인
-   */
   isCountInActive(): boolean {
     return this.countInActive;
   }
 
-  /**
-   * 글로벌 싱크 메트로놈 활성화 상태 확인
-   */
-  isGlobalSyncMetronomeActive(): boolean {
-    return this.globalSyncMetronomeActive;
-  }
+  // ==================== 리소스 정리 ====================
 
-  /**
-   * 리소스 정리
-   */
   dispose(): void {
-    // 카운트인 취소
+    console.log(`[LoopController #${this.instanceId}] 🗑️ dispose 호출`);
     this.cancelCountIn();
-
-    // 메트로놈 루프 범위 해제 및 정지
-    this.metronome.clearLoopRange();
-    this.globalSyncMetronomeActive = false;
-    this.metronome.stop();
+    this.cancelAllScheduled();
+    this.removeVideoEventListeners();
     this.metronome.dispose();
+    this.globalSyncMetronomeActive = false;
   }
-} 
+}

@@ -36,10 +36,77 @@ export class UIController {
   private localTapSyncScore: number = 0;
   private localTapSyncLastResetTime: number = 0;
 
+  // 토스트 메시지 타이머
+  private toastTimer: number | null = null;
+
   constructor() {
     this.ui = new YouTubeUI();
     this.detectTheme();
     this.observeThemeChanges();
+  }
+
+  /**
+   * 토스트 메시지를 표시합니다.
+   * @param message 메시지 내용
+   * @param type 메시지 유형 ('success' | 'error' | 'info')
+   * @param duration 표시 시간 (ms), 기본 2000ms
+   */
+  showToast(message: string, type: 'success' | 'error' | 'info' = 'info', duration: number = 2000): void {
+    // 기존 토스트 제거
+    const existingToast = this.ui.querySelector('.loop-practice-toast');
+    if (existingToast) {
+      existingToast.remove();
+    }
+    if (this.toastTimer !== null) {
+      clearTimeout(this.toastTimer);
+    }
+
+    // 토스트 생성
+    const toast = document.createElement('div');
+    toast.className = `loop-practice-toast toast-${type}`;
+    toast.textContent = message;
+    toast.style.cssText = `
+      position: fixed;
+      bottom: 80px;
+      left: 50%;
+      transform: translateX(-50%);
+      padding: 10px 20px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      z-index: 10002;
+      animation: toastFadeIn 0.2s ease;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+      ${type === 'success' ? 'background: #4caf50; color: white;' : ''}
+      ${type === 'error' ? 'background: #f44336; color: white;' : ''}
+      ${type === 'info' ? `background: ${this.isDarkTheme ? '#424242' : '#333'}; color: white;` : ''}
+    `;
+
+    // 애니메이션 스타일 추가 (없으면)
+    if (!document.getElementById('loop-practice-toast-style')) {
+      const style = document.createElement('style');
+      style.id = 'loop-practice-toast-style';
+      style.textContent = `
+        @keyframes toastFadeIn {
+          from { opacity: 0; transform: translateX(-50%) translateY(10px); }
+          to { opacity: 1; transform: translateX(-50%) translateY(0); }
+        }
+        @keyframes toastFadeOut {
+          from { opacity: 1; transform: translateX(-50%) translateY(0); }
+          to { opacity: 0; transform: translateX(-50%) translateY(-10px); }
+        }
+      `;
+      document.head.appendChild(style);
+    }
+
+    document.body.appendChild(toast);
+
+    // 일정 시간 후 제거
+    this.toastTimer = window.setTimeout(() => {
+      toast.style.animation = 'toastFadeOut 0.2s ease forwards';
+      setTimeout(() => toast.remove(), 200);
+      this.toastTimer = null;
+    }, duration);
   }
 
   /**
@@ -326,6 +393,13 @@ export class UIController {
             <button class="btn btn-small btn-primary" id="createSegment">+</button>
           </div>
 
+          ${this.profile?.globalMetronomeOffset !== undefined ? `
+            <div class="quantize-section">
+              <span class="setting-description">Snap loop start/end points to the nearest beat.</span>
+              <button class="btn btn-small btn-quantize-all" id="quantizeAllBtn">Quantize All</button>
+            </div>
+          ` : ''}
+
           <div class="segments-list" id="segmentsList">
             ${segmentsHTML || '<div class="no-loops">No loops yet. Create one!</div>'}
           </div>
@@ -358,6 +432,7 @@ export class UIController {
     return `
       <div class="setting-group tap-sync-group" ${!isEnabled ? 'style="display: none;"' : ''}>
         <label>Beat Sync <span class="sync-hint">(wired headphones recommended)</span></label>
+        <div class="setting-description">Sync beat timing with the video to find the first downbeat offset.</div>
         <div class="tap-sync-controls">
           <div class="tap-sync-row">
             <button
@@ -374,7 +449,8 @@ export class UIController {
               </div>
               ${hasFirstBeat ? `
                 <div class="sync-time">
-                  <span class="time-value">${this.formatSyncTime(firstBeatTime)}</span>
+                  <span class="time-value" id="syncOffsetDisplay" title="Double-click to edit">${this.formatSyncTime(firstBeatTime)}</span>
+                  <input type="text" class="sync-offset-input" id="syncOffsetInput" style="display: none;" />
                   <button class="btn-sync-clear-inline" id="syncClear" title="Clear sync">✕</button>
                 </div>
               ` : `
@@ -417,6 +493,13 @@ export class UIController {
   }
 
   /**
+   * 박자표에서 마디당 박수를 추출합니다.
+   */
+  private getBeatsPerBar(timeSignature: string): number {
+    return parseInt(timeSignature.split('/')[0], 10) || 4;
+  }
+
+  /**
    * Beat Navigation + Metronome Control HTML을 생성합니다.
    * 비트 네비게이션은 항상 표시되고, 그 아래에 메트로놈 컨트롤이 콤팩트하게 배치됩니다.
    */
@@ -436,30 +519,30 @@ export class UIController {
         <div class="count-in-display" id="countInDisplay">
           ${beatSpans}
         </div>
-        ${hasFirstBeat ? `
-          <div class="metronome-control-row">
-            <button
-              class="btn btn-metronome-compact ${this.isGlobalMetronomeEnabled ? 'active' : ''}"
-              id="globalMetronomeToggle"
-              title="Toggle metronome"
-            >
-              <span class="metronome-icon">♪</span>
-              <span class="metronome-status">${this.isGlobalMetronomeEnabled ? 'ON' : 'OFF'}</span>
-            </button>
-            <div class="volume-control-compact">
-              <span class="volume-icon-small">🔊</span>
-              <input
-                type="range"
-                id="metronomeVolume"
-                class="volume-slider-compact"
-                min="0"
-                max="100"
-                value="${this.metronomeVolume}"
-                title="Volume: ${this.metronomeVolume}%"
-              />
-            </div>
+        <div class="metronome-control-row ${!hasFirstBeat ? 'disabled' : ''}">
+          <button
+            class="btn btn-metronome-compact ${this.isGlobalMetronomeEnabled ? 'active' : ''}"
+            id="globalMetronomeToggle"
+            title="${hasFirstBeat ? 'Toggle metronome' : 'Beat Sync required'}"
+            ${!hasFirstBeat ? 'disabled' : ''}
+          >
+            <span class="metronome-icon">♪</span>
+            <span class="metronome-status">${this.isGlobalMetronomeEnabled ? 'ON' : 'OFF'}</span>
+          </button>
+          <div class="volume-control-compact">
+            <span class="volume-icon-small">🔊</span>
+            <input
+              type="range"
+              id="metronomeVolume"
+              class="volume-slider-compact"
+              min="0"
+              max="100"
+              value="${this.metronomeVolume}"
+              title="${hasFirstBeat ? `Volume: ${this.metronomeVolume}%` : 'Beat Sync required'}"
+              ${!hasFirstBeat ? 'disabled' : ''}
+            />
           </div>
-        ` : ''}
+        </div>
       </div>
     `;
   }
@@ -474,6 +557,10 @@ export class UIController {
     const safeStart = typeof segment.start === 'number' && !isNaN(segment.start) ? segment.start : 0;
     const safeEnd = typeof segment.end === 'number' && !isNaN(segment.end) ? segment.end : 10;
     const safeRate = typeof segment.rate === 'number' && !isNaN(segment.rate) ? segment.rate : 1.0;
+
+    // 커스텀 비트싱크 사용 여부 (useGlobalSync === false이고 로컬 설정이 있는 경우)
+    const hasCustomSync = segment.useGlobalSync === false &&
+      typeof segment.localMetronomeOffset === 'number';
 
     const collapseIcon = isCollapsed
       ? '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z"/></svg>'
@@ -498,11 +585,14 @@ export class UIController {
             <span>${this.formatTime(safeStart)}</span>
             <span>~ ${this.formatTime(safeEnd)}</span>
           </div>
-          <button class="btn btn-loop-compact ${isActive ? 'active' : ''}" data-segment-id="${segment.id}" data-action="jump-and-activate" title="Activate loop">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
-              <path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/>
-            </svg>
-          </button>
+          <div class="loop-btn-container">
+            <button class="btn btn-loop-compact ${isActive ? 'active' : ''}" data-segment-id="${segment.id}" data-action="jump-and-activate" title="Activate loop">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                <path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/>
+              </svg>
+            </button>
+            ${hasCustomSync ? '<span class="custom-sync-badge" title="Custom Beat Sync">C</span>' : ''}
+          </div>
           ` : ''}
           <div class="menu-container">
             <button class="btn-menu" data-segment-id="${segment.id}" data-action="toggle-menu" title="More options">
@@ -554,11 +644,14 @@ export class UIController {
           </div>
           <div class="segment-actions">
             <div class="action-buttons-vertical">
-              <button class="btn btn-loop ${isActive ? 'active' : ''}" data-segment-id="${segment.id}" data-action="jump-and-activate" title="Activate loop">
-                <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
-                  <path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/>
-                </svg>
-              </button>
+              <div class="loop-btn-container">
+                <button class="btn btn-loop ${isActive ? 'active' : ''}" data-segment-id="${segment.id}" data-action="jump-and-activate" title="Activate loop">
+                  <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                    <path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/>
+                  </svg>
+                </button>
+                ${hasCustomSync ? '<span class="custom-sync-badge" title="Custom Beat Sync">C</span>' : ''}
+              </div>
               <!-- 카운트인 버튼 임시 숨김 (로직은 유지) -->
               <!--
               <button class="btn btn-count-in ${segment.countInEnabled ? 'active' : ''}" data-segment-id="${segment.id}" data-action="toggle-count-in" title="Count-in (1 bar before loop)"
@@ -888,6 +981,52 @@ export class UIController {
         opacity: 0.8;
       }
 
+      .setting-description {
+        font-size: 11px;
+        color: ${textSecondary};
+        margin-top: 2px;
+        margin-bottom: 8px;
+        opacity: 0.8;
+      }
+
+      .quantize-section {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 8px 12px;
+        margin-bottom: 8px;
+        background: ${this.isDarkTheme ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)'};
+        border-radius: 4px;
+      }
+
+      .quantize-section .setting-description {
+        margin: 0;
+        flex: 1;
+      }
+
+      .btn-quantize-all {
+        font-size: 11px;
+        padding: 4px 8px;
+        margin-left: 8px;
+        white-space: nowrap;
+        background: ${this.isDarkTheme ? '#3f3f3f' : '#f0f0f0'};
+        border: 1px solid ${this.isDarkTheme ? '#5a5a5a' : '#ccc'};
+        color: ${this.isDarkTheme ? '#fff' : '#333'};
+        border-radius: 4px;
+        cursor: pointer;
+        transition: all 0.2s;
+      }
+
+      .btn-quantize-all:hover {
+        background: ${this.isDarkTheme ? '#4a7fc7' : '#4a7fc7'};
+        border-color: ${this.isDarkTheme ? '#5a9fd7' : '#5a9fd7'};
+        color: white;
+      }
+
+      .btn-quantize-all:active {
+        background: ${this.isDarkTheme ? '#3a6fb7' : '#3a6fb7'};
+      }
+
       .tap-sync-controls {
         display: flex;
         flex-direction: column;
@@ -982,11 +1121,40 @@ export class UIController {
         font-weight: 500;
         font-family: 'Roboto Mono', monospace;
         color: ${textPrimary};
+        cursor: pointer;
+      }
+
+      .sync-time .time-value:hover {
+        text-decoration: underline;
+        text-decoration-style: dotted;
+      }
+
+      .sync-time .sync-offset-input {
+        width: 80px;
+        font-size: 12px;
+        font-weight: 500;
+        font-family: 'Roboto Mono', monospace;
+        color: ${textPrimary};
+        background: ${this.isDarkTheme ? '#1a1a1a' : '#ffffff'};
+        border: 1px solid ${this.isDarkTheme ? '#444' : '#ccc'};
+        border-radius: 4px;
+        padding: 2px 6px;
+        outline: none;
+      }
+
+      .sync-time .sync-offset-input:focus {
+        border-color: #ff0000;
+        box-shadow: 0 0 0 2px rgba(255, 0, 0, 0.2);
       }
 
       .sync-time.placeholder .time-value {
         color: ${textSecondary};
         opacity: 0.5;
+        cursor: default;
+      }
+
+      .sync-time.placeholder .time-value:hover {
+        text-decoration: none;
       }
 
       .btn-sync-clear-inline {
@@ -1025,6 +1193,11 @@ export class UIController {
         justify-content: center;
         gap: 8px;
         margin-top: 6px;
+      }
+
+      .metronome-control-row.disabled {
+        opacity: 0.4;
+        pointer-events: none;
       }
 
       .btn-metronome-compact {
@@ -1538,6 +1711,30 @@ export class UIController {
         background: #065fd4;
         color: white;
         border-color: #065fd4;
+      }
+
+      /* 루프 버튼 컨테이너 (C 배지 포함) */
+      .loop-btn-container {
+        position: relative;
+        display: inline-flex;
+      }
+
+      .custom-sync-badge {
+        position: absolute;
+        top: -4px;
+        right: -4px;
+        background: #ff9800;
+        color: white;
+        font-size: 9px;
+        font-weight: bold;
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        line-height: 1;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.3);
       }
 
       .segment-item.collapsed .segment-body {
@@ -2165,6 +2362,14 @@ export class UIController {
       createBtn.addEventListener('click', () => this.handleCreateSegment());
     }
 
+    // Quantize All 버튼
+    const quantizeAllBtn = this.ui.querySelector('#quantizeAllBtn');
+    if (quantizeAllBtn) {
+      quantizeAllBtn.addEventListener('click', () => {
+        this.onCommand?.('quantize-all', {});
+      });
+    }
+
     // 세그먼트 라벨 input에서 YouTube 단축키 비활성화
     const segmentLabelInput = this.ui.querySelector<HTMLInputElement>('#segmentLabel');
     if (segmentLabelInput) {
@@ -2293,6 +2498,34 @@ export class UIController {
     const syncClear = this.ui.querySelector('#syncClear');
     if (syncClear) {
       syncClear.addEventListener('click', () => this.handleSyncClear());
+    }
+
+    // 오프셋 더블클릭 편집
+    const syncOffsetDisplay = this.ui.querySelector('#syncOffsetDisplay');
+    const syncOffsetInput = this.ui.querySelector('#syncOffsetInput') as HTMLInputElement;
+    if (syncOffsetDisplay && syncOffsetInput) {
+      syncOffsetDisplay.addEventListener('dblclick', () => {
+        const currentOffset = this.profile?.globalMetronomeOffset ?? 0;
+        syncOffsetInput.value = this.formatTime(currentOffset);
+        (syncOffsetDisplay as HTMLElement).style.display = 'none';
+        syncOffsetInput.style.display = 'block';
+        syncOffsetInput.focus();
+        syncOffsetInput.select();
+      });
+
+      syncOffsetInput.addEventListener('blur', () => {
+        this.handleOffsetInputConfirm(syncOffsetDisplay as HTMLElement, syncOffsetInput);
+      });
+
+      syncOffsetInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          this.handleOffsetInputConfirm(syncOffsetDisplay as HTMLElement, syncOffsetInput);
+        } else if (e.key === 'Escape') {
+          e.preventDefault();
+          this.handleOffsetInputCancel(syncOffsetDisplay as HTMLElement, syncOffsetInput);
+        }
+      });
     }
 
     // 글로벌 메트로놈 토글 버튼
@@ -3670,6 +3903,40 @@ export class UIController {
   }
 
   /**
+   * 오프셋 입력 확인 핸들러
+   */
+  private handleOffsetInputConfirm(display: HTMLElement, input: HTMLInputElement) {
+    const value = this.parseTimeInput(input.value);
+
+    if (value !== null && value >= 0) {
+      // 새 오프셋 값으로 업데이트
+      this.onCommand?.('set-global-offset', { offset: value });
+
+      // 직접 입력 시 TAP Sync 점수 리셋 (점수가 의미 없음)
+      this.tapSyncHistory = [];
+      this.tapSyncScore = 0;
+
+      // 디스플레이 업데이트 및 표시 전환
+      display.textContent = this.formatSyncTime(value);
+
+      // UI 업데이트 (점수 표시 갱신)
+      this.render();
+      this.setupEventListeners();
+    }
+
+    display.style.display = '';
+    input.style.display = 'none';
+  }
+
+  /**
+   * 오프셋 입력 취소 핸들러
+   */
+  private handleOffsetInputCancel(display: HTMLElement, input: HTMLInputElement) {
+    display.style.display = '';
+    input.style.display = 'none';
+  }
+
+  /**
    * 글로벌 메트로놈 토글 핸들러
    */
   private handleGlobalMetronomeToggle() {
@@ -4175,24 +4442,22 @@ export class UIController {
               <div class="setting-row tap-sync-section">
                 <label>Beat Sync:</label>
                 <div class="tap-sync-controls-modal">
-                  <button class="btn btn-tap-sync-modal" id="localTapSyncBtn" ${useCustom ? '' : 'disabled'}>
-                    TAP
-                  </button>
-                  <div class="tap-sync-score-modal" id="localTapSyncScore" style="display: none;">
-                    --%
+                  <div class="tap-sync-row-modal">
+                    <button class="btn btn-tap-sync-modal ${this.localTapSyncCurrentBeat > 0 ? 'tapped' : ''}" id="localTapSyncBtn" ${useCustom ? '' : 'disabled'}>
+                      ${this.localTapSyncCurrentBeat > 0 ? `${this.localTapSyncCurrentBeat}/${this.getBeatsPerBar(localTimeSignature)}` : 'TAP'}
+                    </button>
+                    <div class="sync-result-box-modal ${hasLocalOffset ? 'has-result' : ''}" id="localSyncResultBox">
+                      <div class="sync-score-modal" id="localTapSyncScore">
+                        <span class="score-label">Sync:</span>
+                        <span class="score-value" id="localScoreValue">${this.localTapSyncHistory.length >= this.TAP_SYNC_MIN_SAMPLES ? `${this.localTapSyncScore}%` : '--%'}</span>
+                      </div>
+                      <div class="sync-time-modal">
+                        <span class="time-value" id="localSyncResult" title="Double-click to edit">${hasLocalOffset ? this.formatSyncTime(localOffset!) : '--:---.---'}</span>
+                        <input type="text" class="sync-offset-input-modal" id="localSyncOffsetInput" style="display: none;" placeholder="0:00.000" />
+                        <button class="btn-sync-clear-inline" id="localSyncClear" ${useCustom && hasLocalOffset ? '' : 'style="display:none;"'} title="Clear sync">✕</button>
+                      </div>
+                    </div>
                   </div>
-                </div>
-              </div>
-
-              <div class="setting-row" id="localSyncResultRow">
-                <label>1st Beat:</label>
-                <span class="sync-result-value" id="localSyncResult">${hasLocalOffset ? this.formatSyncTime(localOffset!) : '--'}</span>
-                <div class="fine-tune-buttons">
-                  <button class="btn-fine-tune" id="localSyncMinus10" ${useCustom ? '' : 'disabled'}>-10</button>
-                  <button class="btn-fine-tune" id="localSyncMinus1" ${useCustom ? '' : 'disabled'}>-1</button>
-                  <button class="btn-fine-tune" id="localSyncPlus1" ${useCustom ? '' : 'disabled'}>+1</button>
-                  <button class="btn-fine-tune" id="localSyncPlus10" ${useCustom ? '' : 'disabled'}>+10</button>
-                  <button class="btn-fine-tune btn-clear" id="localSyncClear" ${useCustom ? '' : 'disabled'}>Clear</button>
                 </div>
               </div>
             </div>
@@ -4377,6 +4642,97 @@ export class UIController {
         .btn-fine-tune.btn-clear {
           color: #f44;
         }
+
+        /* 모달용 TAP Sync 스타일 (글로벌과 동일하게 통일) */
+        .tap-sync-row-modal {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+        .btn-tap-sync-modal {
+          padding: 8px 16px;
+          font-size: 13px;
+          font-weight: bold;
+          background: var(--modal-bg-secondary);
+          border: 2px solid var(--modal-border);
+          color: var(--modal-text);
+          border-radius: 6px;
+          cursor: pointer;
+          min-width: 50px;
+          text-align: center;
+          transition: all 0.15s;
+        }
+        .btn-tap-sync-modal:hover:not(:disabled) {
+          background: var(--modal-border);
+        }
+        .btn-tap-sync-modal.tapped {
+          background: var(--modal-accent);
+          border-color: var(--modal-accent);
+          color: white;
+        }
+        .btn-tap-sync-modal:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
+        }
+        .sync-result-box-modal {
+          display: flex;
+          flex-direction: column;
+          padding: 6px 10px;
+          border-radius: 6px;
+          background: var(--modal-bg-secondary);
+          border: 1px solid var(--modal-border);
+          min-width: 100px;
+        }
+        .sync-result-box-modal.has-result {
+          border-color: var(--modal-accent);
+        }
+        .sync-score-modal {
+          display: flex;
+          gap: 4px;
+          font-size: 11px;
+          color: var(--modal-text-secondary);
+        }
+        .sync-score-modal .score-value {
+          font-weight: bold;
+        }
+        .sync-time-modal {
+          display: flex;
+          align-items: center;
+          gap: 4px;
+        }
+        .sync-time-modal .time-value {
+          font-family: 'Courier New', monospace;
+          font-size: 13px;
+          color: var(--modal-text);
+          cursor: pointer;
+        }
+        .sync-time-modal .time-value:hover {
+          text-decoration: underline;
+        }
+        .sync-offset-input-modal {
+          font-family: 'Courier New', monospace;
+          font-size: 13px;
+          color: var(--modal-text);
+          background: var(--modal-bg-secondary);
+          border: 1px solid var(--modal-accent);
+          border-radius: 4px;
+          padding: 2px 6px;
+          width: 80px;
+          outline: none;
+        }
+        .btn-sync-clear-inline {
+          background: none;
+          border: none;
+          color: #f44;
+          cursor: pointer;
+          padding: 0 4px;
+          font-size: 12px;
+          opacity: 0.7;
+        }
+        .btn-sync-clear-inline:hover {
+          opacity: 1;
+        }
+
         .beat-sync-modal-footer {
           display: flex;
           justify-content: flex-end;
@@ -4484,6 +4840,40 @@ export class UIController {
       this.resetLocalTapSync();
       this.updateLocalTapSyncUI(modalContainer);
     });
+
+    // 오프셋 더블클릭 편집
+    const localSyncResult = modalContainer.querySelector('#localSyncResult') as HTMLElement;
+    const localSyncOffsetInput = modalContainer.querySelector('#localSyncOffsetInput') as HTMLInputElement;
+    if (localSyncResult && localSyncOffsetInput) {
+      localSyncResult.addEventListener('dblclick', () => {
+        // Use custom settings가 활성화되어 있을 때만 편집 가능
+        const useCustomCheckbox = modalContainer.querySelector('#useCustomSyncCheckbox') as HTMLInputElement;
+        if (!useCustomCheckbox?.checked) return;
+
+        const currentText = localSyncResult.textContent || '';
+        const currentOffset = this.parseTimeToSeconds(currentText);
+        localSyncOffsetInput.value = this.formatTime(currentOffset);
+        localSyncResult.style.display = 'none';
+        localSyncOffsetInput.style.display = 'block';
+        localSyncOffsetInput.focus();
+        localSyncOffsetInput.select();
+      });
+
+      localSyncOffsetInput.addEventListener('blur', () => {
+        this.handleLocalOffsetInputConfirm(localSyncResult, localSyncOffsetInput, modalContainer);
+      });
+
+      localSyncOffsetInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          this.handleLocalOffsetInputConfirm(localSyncResult, localSyncOffsetInput, modalContainer);
+        } else if (e.key === 'Escape') {
+          e.preventDefault();
+          localSyncResult.style.display = '';
+          localSyncOffsetInput.style.display = 'none';
+        }
+      });
+    }
 
     // 저장 버튼
     const saveBtn = modalContainer.querySelector('#beatSyncModalSave');
@@ -4674,6 +5064,38 @@ export class UIController {
       return mins * 60 + secs;
     }
     return parseFloat(timeStr) || 0;
+  }
+
+  /**
+   * 로컬 오프셋 입력 확인 핸들러 (커스텀 Beat Sync 모달용)
+   */
+  private handleLocalOffsetInputConfirm(
+    display: HTMLElement,
+    input: HTMLInputElement,
+    modalContainer: HTMLElement
+  ) {
+    const value = this.parseTimeInput(input.value);
+
+    if (value !== null && value >= 0) {
+      // 디스플레이 업데이트
+      display.textContent = this.formatSyncTime(value);
+
+      // 직접 입력 시 TAP Sync 점수 리셋
+      this.localTapSyncHistory = [];
+      this.localTapSyncScore = 0;
+      this.updateLocalTapSyncUI(modalContainer);
+
+      // Clear 버튼 표시
+      const clearBtn = modalContainer.querySelector('#localSyncClear') as HTMLElement;
+      if (clearBtn) clearBtn.style.display = '';
+
+      // sync-result-box에 has-result 클래스 추가
+      const resultBox = modalContainer.querySelector('#localSyncResultBox');
+      if (resultBox) resultBox.classList.add('has-result');
+    }
+
+    display.style.display = '';
+    input.style.display = 'none';
   }
 
   /**
