@@ -45,7 +45,7 @@ Whether you're learning guitar riffs, bass lines, drum patterns, or piano pieces
 - **Adjustable Volume** - control metronome volume with a slider
 - Support for various time signatures: 2/4, 3/4, 4/4, 5/4, 6/8, 7/8, 9/8, 12/8, 6/4
 - **Per-loop Beat Settings** - each loop can have its own tempo and offset
-- **Anacrusis Support** - proper beat numbering for pickup measures (못갖춘마디)
+- **Anacrusis Support** - proper beat numbering for pickup measures
 
 **💾 Smart Data Management**
 - All settings auto-save - never lose your practice setup
